@@ -1,0 +1,46 @@
+{
+  "name": "611nft",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "611nft bilingual multi-wallet mint monitor with an eRPC resilience layer",
+  "license": "MIT",
+  "author": "xiaobao-ops",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaobao-ops/611nft.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiaobao-ops/611nft/issues"
+  },
+  "homepage": "https://github.com/xiaobao-ops/611nft#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "nft",
+    "mint",
+    "multi-wallet",
+    "ethereum",
+    "robinhood-chain",
+    "erpc"
+  ],
+  "scripts": {
+    "mint": "node scripts/run-mint.mjs",
+    "start": "node scripts/start-stack.mjs",
+    "start:app": "node server/index.mjs",
+    "start:erpc": "node scripts/start-erpc.mjs",
+    "erpc:build": "node scripts/erpc-runtime.mjs --build",
+    "erpc:validate": "node scripts/validate-erpc.mjs",
+    "dev": "node scripts/start-stack.mjs",
+    "check": "node --check mint.mjs && node --check lib/mint-core.mjs && node --check lib/wallet-config.mjs && node --check server/index.mjs && node --check server/ws-lite.mjs && node --check scripts/erpc-runtime.mjs && node --check scripts/run-mint.mjs && node --check scripts/start-erpc.mjs && node --check scripts/start-stack.mjs && node --check scripts/validate-erpc.mjs && node --check apps/web/app.js",
+    "test": "npm run check && npm run erpc:validate"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "viem": "^2.55.13",
+    "ws": "^8.21.3"
+  }
+}
