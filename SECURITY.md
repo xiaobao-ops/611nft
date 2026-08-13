@@ -8,7 +8,7 @@
 
 请使用 GitHub 仓库的 **Security → Report a vulnerability** 私密报告功能提交安全问题：
 
-<https://github.com/xiaobao-ops/611nft/security/advisories/new>
+<https://github.com/Zerorisklabs-V1/611nft/security/advisories/new>
 
 报告建议包含：
 

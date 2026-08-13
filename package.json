@@ -5,15 +5,15 @@
   "type": "module",
   "description": "611nft bilingual multi-wallet mint monitor with an eRPC resilience layer",
   "license": "MIT",
-  "author": "xiaobao-ops",
+  "author": "Zerorisklabs-V1",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xiaobao-ops/611nft.git"
+    "url": "git+https://github.com/Zerorisklabs-V1/611nft.git"
   },
   "bugs": {
-    "url": "https://github.com/xiaobao-ops/611nft/issues"
+    "url": "https://github.com/Zerorisklabs-V1/611nft/issues"
   },
-  "homepage": "https://github.com/xiaobao-ops/611nft#readme",
+  "homepage": "https://github.com/Zerorisklabs-V1/611nft#readme",
   "engines": {
     "node": ">=22"
   },

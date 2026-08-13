@@ -88,7 +88,7 @@ flowchart LR
 ## 快速开始
 
 ```bash
-git clone https://github.com/xiaobao-ops/611nft.git
+git clone https://github.com/Zerorisklabs-V1/611nft.git
 cd 611nft
 npm ci
 cp .env.example .env
@@ -285,7 +285,7 @@ npm test
 ### Quick start
 
 ```bash
-git clone https://github.com/xiaobao-ops/611nft.git
+git clone https://github.com/Zerorisklabs-V1/611nft.git
 cd 611nft
 npm ci
 cp .env.example .env
