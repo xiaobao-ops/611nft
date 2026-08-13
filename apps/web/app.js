@@ -1,3 +1,5 @@
+import {resolveMintSupplyUpdate} from './supply-sync.js';
+
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -95,6 +97,8 @@ const state = {
   selectedQuantity: 1,
   currentJob: null,
   currentJobTimer: null,
+  detailRefreshTimer: null,
+  detailRefreshRequest: 0,
 };
 
 function t(key, params = {}) {
@@ -477,9 +481,13 @@ function updateMintPreviewButton() {
 
 async function selectCollection(address, chain = 'ethereum') {
   const key = collectionKey(chain, address);
+  clearTimeout(state.detailRefreshTimer);
+  state.detailRefreshTimer = null;
+  const request = ++state.detailRefreshRequest;
   state.selectedAddress = address;
   state.selectedChain = chain;
   state.selectedKey = key;
+  state.detail = null;
   state.currentJob = null;
   $('#walletPlanList').innerHTML = '';
   $('#mintConfirm').hidden = true;
@@ -493,7 +501,7 @@ async function selectCollection(address, chain = 'ethereum') {
   sendWs({type: 'view', address, chain});
   try {
     const data = await fetchJson(`/api/collection/${address}?chain=${encodeURIComponent(chain)}`);
-    if (state.selectedKey !== key) return;
+    if (state.selectedKey !== key || state.detailRefreshRequest !== request) return;
     state.detail = data;
     renderDetail(data);
     await loadWallets();
@@ -501,6 +509,28 @@ async function selectCollection(address, chain = 'ethereum') {
     $('#detailTitle').textContent = t('unavailable');
     toast(error.message);
   }
+}
+
+async function refreshSelectedDetail() {
+  if (!state.selectedAddress || !state.selectedKey) return false;
+  const address = state.selectedAddress;
+  const chain = state.selectedChain;
+  const key = state.selectedKey;
+  const request = ++state.detailRefreshRequest;
+  const data = await fetchJson(`/api/collection/${address}?chain=${encodeURIComponent(chain)}`);
+  if (state.selectedKey !== key || state.detailRefreshRequest !== request) return false;
+  state.detail = data;
+  renderDetail(data);
+  return true;
+}
+
+function scheduleDetailRefresh(key) {
+  if (state.detailRefreshTimer) return;
+  state.detailRefreshTimer = setTimeout(() => {
+    state.detailRefreshTimer = null;
+    if (state.selectedKey !== key || !state.detail) return;
+    refreshSelectedDetail().catch((error) => console.warn(`Collection detail refresh failed: ${error.message}`));
+  }, 500);
 }
 
 function fmtEth(value) {
@@ -789,6 +819,24 @@ function renderMint(value) {
   const existing = state.feedIndex.get(groupKey);
   const now = Date.now();
   const eventCount = Math.max(1, Number(value.activity_count || 1));
+  if (state.selectedKey === key && state.detail) {
+    const supply = resolveMintSupplyUpdate(state.detail, value);
+    if (supply.authoritative) {
+      clearTimeout(state.detailRefreshTimer);
+      state.detailRefreshTimer = null;
+      state.detail.current_supply = supply.currentSupply;
+      if (supply.maxSupply != null) state.detail.max_supply = supply.maxSupply;
+      const currentSupply = $('[data-stat-key="totalMinted"] .stat-value', $('#detailStats'));
+      const maxSupply = $('[data-stat-key="maxSupply"] .stat-value', $('#detailStats'));
+      if (currentSupply) currentSupply.textContent = supply.currentSupply.toLocaleString();
+      if (maxSupply && supply.maxSupply != null) maxSupply.textContent = supply.maxSupply.toLocaleString();
+    } else {
+      scheduleDetailRefresh(key);
+    }
+    if (value.tx_hash) {
+      renderRecentMints([{timestamp: value.timestamp, to_address: value.to_address, token_id: value.token_id, tx_hash: value.tx_hash}, ...(state.detail.recent_mints || [])].slice(0, 50), chain);
+    }
+  }
   if (existing && now - Number(existing.dataset.seenAt) < 60_000) {
     const count = Number(existing.dataset.count || 1) + eventCount;
     existing.dataset.count = String(count);
@@ -828,14 +876,6 @@ function renderMint(value) {
   feed.prepend(row);
   state.feedIndex.set(groupKey, row);
   while (feed.children.length > state.maxLive) feed.lastElementChild.remove();
-  if (state.selectedKey === key && state.detail) {
-    state.detail.current_supply = Number(state.detail.current_supply || 0) + eventCount;
-    if (value.tx_hash) {
-      renderRecentMints([{timestamp: value.timestamp, to_address: value.to_address, token_id: value.token_id, tx_hash: value.tx_hash}, ...(state.detail.recent_mints || [])].slice(0, 50), chain);
-    }
-    const first = $('[data-stat-key="totalMinted"] .stat-value', $('#detailStats'));
-    if (first) first.textContent = state.detail.current_supply.toLocaleString();
-  }
 }
 
 function renderAlert(value) {
@@ -1019,7 +1059,7 @@ function bindEvents() {
   $$('.language-option').forEach((button) => button.addEventListener('click', () => setLanguage(button.dataset.lang)));
   $$('.mobile-tab').forEach((button) => button.addEventListener('click', () => switchMobileTab(button.dataset.panel)));
   $('#detailBack').addEventListener('click', () => switchMobileTab('left'));
-  $('#resyncBtn').addEventListener('click', () => state.selectedAddress && selectCollection(state.selectedAddress, state.selectedChain));
+  $('#resyncBtn').addEventListener('click', () => refreshSelectedDetail().catch((error) => toast(error.message)));
   $('#hiddenCounter').addEventListener('click', () => { $('#hiddenPanel').hidden = false; });
   $('#hiddenBar').addEventListener('click', () => { $('#hiddenPanel').hidden = false; });
   $('#closeHiddenBtn').addEventListener('click', () => { $('#hiddenPanel').hidden = true; });

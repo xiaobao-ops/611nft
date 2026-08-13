@@ -124,9 +124,9 @@ async function collectionMintSnapshot(item) {
   return {data, freshMints};
 }
 
-async function emitOverviewDiff(data) {
+async function emitOverviewDiff(data, {emitMints = true} = {}) {
   const current = new Map(overviewRows(data).map((item) => [overviewSignature(item), item]));
-  if (lastOverviewSnapshot) {
+  if (emitMints && lastOverviewSnapshot) {
     for (const [key, item] of current) {
       const previous = lastOverviewSnapshot.get(key);
       if (!previous) continue;
@@ -156,6 +156,8 @@ async function emitOverviewDiff(data) {
         to_address: latestMint?.to_address || null,
         tx_hash: latestMint?.tx_hash || null,
         token_id: latestMint?.token_id ?? null,
+        current_supply: detail?.current_supply ?? null,
+        max_supply: detail?.max_supply ?? null,
         timestamp,
         is_airdrop: Boolean(detail?.is_airdrop ?? item.is_airdrop),
       });
@@ -168,7 +170,7 @@ async function pollOverview() {
   if (shuttingDown) return;
   try {
     const data = await proxyJson('/api/overview/all');
-    await emitOverviewDiff(data);
+    await emitOverviewDiff(data, {emitMints: upstreamSocket?.readyState !== WebSocket.OPEN});
     const signature = crypto.createHash('sha256').update(JSON.stringify(data.windows || {})).digest('hex');
     if (signature !== lastOverviewSignature) {
       lastOverviewSignature = signature;
