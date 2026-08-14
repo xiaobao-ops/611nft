@@ -36,23 +36,16 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -d node_modules/viem || ! -d node_modules/dotenv ]]; then
+if [[ ! -d node_modules/viem ]]; then
   echo "首次运行，正在自动安装依赖..."
   npm ci || exit 1
   echo
 fi
 
-if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
-  echo "未找到 .env 文件，请先在其中每行直接填写一个私钥。"
+if ! command -v awp-wallet >/dev/null 2>&1; then
+  echo "未找到 awp-wallet。请先安装并配置本地 AWP wallet profiles。"
   exit 1
 fi
-
-if ! node --input-type=module -e "import {loadAccounts} from './lib/mint-core.mjs'; loadAccounts();" >/dev/null 2>&1; then
-  echo "当前 .env 未找到有效钱包，或私钥格式不正确。"
-  echo "请每行直接填写一个 64 位十六进制私钥，不写变量名，也不加 0x。"
-  exit 1
-fi
-chmod 600 "$SCRIPT_DIR/.env"
 
 contract_address=""
 while true; do
@@ -63,5 +56,12 @@ while true; do
   echo "CA 格式错误，请输入以 0x 开头的 40 位 EVM 合约地址。"
 done
 
+read -r "wallet_profiles?请输入 AWP wallet profile ID（多个用逗号分隔）: "
+if [[ -z "${wallet_profiles//[[:space:]]/}" ]]; then
+  echo "至少需要一个 AWP wallet profile。"
+  exit 1
+fi
+
 echo
-node mint.mjs "$contract_address" --send
+echo "请先确保 611nft Dashboard 服务已启动。"
+node server/nft-mint-cli.js "$contract_address" --wallets "$wallet_profiles" --send

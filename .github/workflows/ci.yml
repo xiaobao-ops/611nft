@@ -18,8 +18,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
       - run: npm ci
-      - run: npm test
+      - run: npm run check
+      - run: npm ci --prefix ascii-cats-mint
+      - run: npm run check --prefix ascii-cats-mint
+      - run: npm test --prefix ascii-cats-mint
