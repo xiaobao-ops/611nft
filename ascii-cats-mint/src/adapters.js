@@ -12,6 +12,21 @@ function receiptStatus(receipt) {
   throw new Error('unknown transaction receipt status');
 }
 
+function requestAbortSignal(callerSignal, timeoutMs) {
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(callerSignal.reason);
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error('Ticket API request timed out')), timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener('abort', abortFromCaller);
+    },
+  };
+}
+
 export function createTicketClient({
   url,
   fetchFn,
@@ -27,7 +42,7 @@ export function createTicketClient({
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
     throw new Error('Ticket API timeout must be a positive integer');
   }
-  if (signal !== undefined && typeof signal?.aborted !== 'boolean') {
+  if (signal !== undefined && (typeof signal?.aborted !== 'boolean' || typeof signal?.addEventListener !== 'function')) {
     throw new Error('Ticket API signal must be an AbortSignal');
   }
 
@@ -37,37 +52,48 @@ export function createTicketClient({
       if (requireDispatcher && !requestDispatcher) {
         throw new Error('Ticket dispatcher is required');
       }
+      const requestAbort = requestAbortSignal(signal, timeoutMs);
       const options = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address }),
-        signal: signal
-          ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
-          : AbortSignal.timeout(timeoutMs),
+        signal: requestAbort.signal,
       };
       // Route this wallet's ticket request through its bound proxy so the
       // backend sees a distinct egress IP (1 IP = 1 mint). Omit the key
       // entirely when unset so direct requests behave exactly as before.
       if (requestDispatcher) options.dispatcher = requestDispatcher;
 
-      let response;
       try {
-        response = await fetchFn(url, options);
-      } catch (error) {
-        const message = signal?.aborted
-          ? 'Ticket API request aborted'
-          : 'Ticket API request failed or timed out';
-        throw new Error(message, { cause: error });
-      }
+        let response;
+        try {
+          response = await fetchFn(url, options);
+        } catch (error) {
+          const message = signal?.aborted
+            ? 'Ticket API request aborted'
+            : 'Ticket API request failed or timed out';
+          throw new Error(message, { cause: error });
+        }
 
-      if (!response.ok) {
-        throw new Error(`Ticket API HTTP ${response.status}`);
-      }
+        if (!response.ok) {
+          throw new Error(`Ticket API HTTP ${response.status}`);
+        }
 
-      try {
-        return await response.json();
+        try {
+          return await response.json();
+        } catch (error) {
+          if (requestAbort.signal.aborted) {
+            const message = signal?.aborted
+              ? 'Ticket API request aborted'
+              : 'Ticket API request failed or timed out';
+            throw new Error(message, { cause: error });
+          }
+          throw new Error('Ticket API returned invalid JSON', { cause: error });
+        }
       } catch (error) {
-        throw new Error('Ticket API returned invalid JSON', { cause: error });
+        throw error;
+      } finally {
+        requestAbort.cleanup();
       }
     },
   });
