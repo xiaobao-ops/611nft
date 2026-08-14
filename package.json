@@ -1,9 +1,9 @@
 {
   "name": "611nft",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "611nft bilingual multi-wallet mint monitor with an eRPC resilience layer",
+  "description": "611nft local-first multi-chain NFT mint monitor and AWP wallet console",
   "license": "MIT",
   "author": "xiaobao-ops",
   "repository": {
@@ -23,25 +23,28 @@
     "multi-wallet",
     "ethereum",
     "robinhood-chain",
-    "erpc"
+    "awp-wallet"
   ],
   "scripts": {
-    "mint": "node scripts/run-mint.mjs",
-    "start": "node scripts/start-stack.mjs",
-    "start:app": "node server/index.mjs",
-    "start:erpc": "node scripts/start-erpc.mjs",
-    "erpc:build": "node scripts/erpc-runtime.mjs --build",
-    "erpc:validate": "node scripts/validate-erpc.mjs",
-    "dev": "node scripts/start-stack.mjs",
-    "check": "node --check mint.mjs && node --check lib/mint-core.mjs && node --check lib/wallet-config.mjs && node --check server/index.mjs && node --check server/ws-lite.mjs && node --check scripts/erpc-runtime.mjs && node --check scripts/run-mint.mjs && node --check scripts/start-erpc.mjs && node --check scripts/start-stack.mjs && node --check scripts/validate-erpc.mjs && node --check apps/web/app.js && node --check apps/web/supply-sync.js",
-    "test:unit": "node --test tests/*.test.mjs",
-    "test": "npm run check && npm run test:unit && npm run erpc:validate"
+    "dev": "concurrently -k \"npm:server\" \"npm:client\"",
+    "server": "node --experimental-sqlite server/index.js",
+    "client": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "mint": "node server/nft-mint-cli.js",
+    "test": "node --test test/*.test.js",
+    "test:ascii": "npm --prefix ascii-cats-mint test",
+    "check": "node --check server/*.js && npm test && npm run build"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "viem": "^2.55.13",
-    "ws": "^8.21.3"
-  }
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
+    "express": "^5.2.1",
+    "lucide-react": "^0.562.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "viem": "^2.43.2",
+    "vite": "^7.3.0"
+  },
+  "devDependencies": {}
 }

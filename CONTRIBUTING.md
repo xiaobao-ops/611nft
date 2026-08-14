@@ -12,16 +12,38 @@ cp .env.example .env
 npm test
 ```
 
-Node.js 需要 22 或更高版本。首次构建 eRPC 还需要 Go 工具链。
+Node.js 需要 22 或更高版本。钱包写操作的本地验证还需要独立安装 `awp-wallet`。
+
+## Git worktree 协作
+
+团队成员不要在共享的主工作目录中直接开发。每个任务使用独立分支和独立 worktree：
+
+```bash
+git fetch origin
+git worktree add ../611nft-<task> -b <type>/<task> origin/main
+cd ../611nft-<task>
+npm ci
+```
+
+在任务 worktree 中完成开发、测试、提交和推送，然后创建 Pull Request。合并后清理本地 worktree：
+
+```bash
+cd ../611nft
+git worktree remove ../611nft-<task>
+git branch -d <type>/<task>
+git worktree prune
+```
+
+每个分支只能被一个 worktree 检出；不要让多名成员共享同一个 worktree、分支或 `.env`。分支名使用 `feat/`、`fix/`、`docs/` 或 `chore/` 前缀，并保持一个任务对应一个 Pull Request。
 
 ## 提交 Pull Request
 
-1. 从最新 `main` 创建功能分支。
+1. 从最新 `origin/main` 创建任务 worktree 和功能分支。
 2. 保持改动聚焦，避免把无关格式化混入同一提交。
 3. 修改行为时同步更新 README 或 DESIGN。
-4. 运行 `npm test`，并说明其它手工验证步骤。
+4. 运行 `npm run check`；触及专项 runner 时还需运行 `npm test --prefix ascii-cats-mint`。
 5. UI 改动请附桌面端和移动端截图。
-6. Mint 执行改动必须说明 Preview、确认、广播和失败路径的影响。
+6. Mint、转账、授权或 contract call 改动必须说明 Preview、确认、广播、partial 和 pending 路径的影响。
 
 ## 数据与凭据
 

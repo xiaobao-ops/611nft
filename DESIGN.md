@@ -1,53 +1,82 @@
-# 611nft 设计与安全说明
+# 611nft 2.0 设计与安全说明
 
-## 威胁模型与信任边界
+## 目标
 
-- **高价值资产**：本地钱包私钥、待签名交易、confirmation token、带认证信息的 RPC/Cookie 配置。
-- **受信任边界**：运行 611nft 的本机、项目 `.env`、本地 Node.js 进程和显式配置的 RPC 上游。
-- **不受信任输入**：合集/实时数据上游、GraphQL 返回、RPC 响应、浏览器请求体、URL hash、WebSocket 消息和外部链接。
-- **主要防御目标**：私钥泄露、错误链/错误目标广播、过期价格计划、重复广播、未选钱包签名、远程网页直接调用本地服务。
-- **边界外风险**：运行机器已被控制、恶意 npm/Go 工具链、上游蓄意返回但仍通过业务校验的数据，以及用户确认后的链上市场风险。
+611nft 2.0 将原双链 Vanilla/eRPC Mint 面板升级为 React + Express 的七链本地工作台，同时保持三个原则：真实链上数据、私钥隔离、任何资产写入必须在服务端二次确认。
 
 ## 架构
 
-- `apps/web/`：Vanilla JS 三栏 SPA，使用 611nft Logo/品牌，复用取证到的布局变量与交互结构。
-- `server/index.mjs`：本地静态服务器、真实数据代理、本地 WebSocket、Mint Preview/Job/Send。
-- `lib/mint-core.mjs`：CLI 与 Web 共用的钱包加载、OpenSea 计划、链校验、Gas/余额预检、SeaDrop 重报价、并发发送。
-- `lib/wallet-config.mjs`：从 `.env` 提取逐行裸私钥，并保持普通 dotenv 配置和旧钱包变量兼容。
-- `mint.mjs`：保留原 CLI 入口。
-- `erpc/erpc.js`、`scripts/start-stack.mjs`：固定版本 eRPC 的多上游、重试/hedging/熔断/缓存配置及完整栈生命周期。
+```mermaid
+flowchart LR
+  UI["React / Vite UI"] -->|"HTTP + SSE"| API["Express 5 API"]
+  API --> DB["SQLite metadata / tasks / minters"]
+  API --> MON["Direct NFT monitor"]
+  MON --> POOL["In-process RPC pool"]
+  API --> AWP["awp-wallet profiles"]
+  API --> PLAN["OpenSea mint planning"]
+  API --> ASCII["Optional ASCII Cats runner"]
+```
 
-## 数据流
+- `src/`：React 工作台、监控详情和任务状态。
+- `server/index.js`：API、SQLite、AWP 子进程、Preview/Confirm 状态机。
+- `server/mint-monitor.js`：链上日志扫描、供应量、Mint 价格、媒体与 lifetime minters。
+- `server/rpc-pool.js`：hedging、短期缓存、inflight 合并、熔断；写方法只发一个上游。
+- `ascii-cats-mint/`：固定 Robinhood ASCII Cats 流程的独立 fail-closed runner。
 
-1. `/api/chains`、`/api/overview/all`、`/api/collection/:address` 代理真实数据。
-2. `/ws/mints` 优先转发目标 WebSocket 的非聊天事件；握手被限速时，服务端每 5 秒比较真实 60 秒 Overview 的 `total_mints` 增量并生成活动事件，不使用 mock。
-3. `/api/wallets` 只输出地址与余额。
-4. `/api/mint/preview` 为每个钱包构造独立交易计划，服务端保存含 account 的任务对象，响应经过脱敏。
-5. `/api/mint/send` 校验一次性 confirmation token 后并发广播；状态通过本地 WebSocket 发布。
-6. `/api/rpc/status` 对 eRPC 的两条链执行 `eth_chainId` 与 `eth_blockNumber` 批量探测，返回区块高度和延迟。
+## 数据与信任边界
 
-## 品牌与本地化
+高价值资产：AWP 私钥材料、confirmation token、认证 RPC URL、远程 API token、待广播交易。
 
-- 产品标题、页签、左上角名称与 Logo 统一为 611nft；Logo 文件为 `apps/web/assets/611nft-logo.png`。
-- `apps/web/app.js` 内置 `zh-CN` / `en` 字典，静态标签与动态钱包、统计、Preview、Live Feed 状态共用同一翻译入口。
-- 首次语言根据浏览器语言选择，用户选择保存在 `611nft_lang`；390px 视口保留 Logo 与语言按钮且不产生横向溢出。
-- eRPC 子进程只接收外部上游列表；Web/CLI 子进程才接收 `http://127.0.0.1:4000/main/evm/:chainId`，从进程边界阻止聚合 RPC 自循环。
-- eRPC 在 `.runtime/erpc` 独立工作目录启动，避免其内置 dotenv 解析器读取项目根目录中的逐行裸私钥。
+受信任：运行主机、本地 AWP profile、项目根 `.env`、显式配置的 RPC。
 
-## 关键安全决策
+不受信任：浏览器请求、合集/provider 数据、RPC 响应、NFT metadata、OpenSea 交易计划、Blockscout、代理 API 和 runner ticket。
 
-- 默认 Preview，广播必须第二次显式确认；token 仅在 `previewed` 状态返回，发送后立即清空。
-- Web 与 CLI 链配置隔离，避免 CLI 的 `CHAIN_*` 将 UI 的 Ethereum 请求错误路由到 Robinhood。
-- OpenSea 返回内容视为外部数据：校验同链、networkId、目标地址和 calldata。
-- 拒绝跨链 Relayer；私钥不进入 URL、GraphQL、前端、日志或持久化任务文件。
-- 每钱包独立从 OpenSea 获取计划，不复用其它钱包的 calldata 签名上下文。
-- SeaDrop `mintPublic` 发送前读取 `getPublicDrop`；价格上涨要求重新 Preview。
-- 余额不足钱包跳过；其它预检异常阻止整批任务。
-- 浏览器响应不含 calldata 和私钥，仅显示必要交易摘要。
-- 服务默认仅监听 `127.0.0.1:18787`，禁用跨域响应和 `X-Powered-By`。
+SQLite 保存钱包 profile ID/地址、标签、余额、任务、交易摘要和 minter 游标，不保存私钥或助记词。
 
-## 已知外部条件
+## Mint 监控与供应量
 
-- 目标 WebSocket 可能按出口限速。直连恢复后自动切回完整消息流；期间真实 Overview 增量仍驱动列表和 Live Feed。
-- OpenSea GraphQL schema、公开 RPC 或 Mint 阶段随时间变化时，Preview 会以逐钱包错误呈现，不自动广播。
-- 链上交易确认后不可逆；操作者需核对合约、链、金额、Gas 和每钱包计划。
+监控器从 ERC-721/ERC-1155 的零地址 Transfer 建立活动集合，读取链上 `totalSupply()` 作为当前供应量的权威值，并尝试 `maxSupply`、`MAX_SUPPLY`、`collectionSize` 作为上限。临时读取失败时，只在已有快照上增加本批事件数量，并封顶已知最大供应量。
+
+provider 仅作为补充；本地链上状态优先。首次无法读取供应量时显示未知，不以事件计数伪装权威总供应量。
+
+## 资产写入协议
+
+### NFT Mint
+
+1. Preview 校验钱包、链、collection bytecode、provider chain、目标 bytecode、calldata、Gas、余额和值上限。
+2. 服务器生成十分钟有效的一次性 token。
+3. Send 使用 timing-safe 比较，立刻销毁 token。
+4. 广播前重新读取 SeaDrop 公售价格、余额并执行 `eth_call`。
+5. receipt 未决与 confirmed 分开表示，不把 pending 当成功。
+
+### 通用交易
+
+转账、归集、授权和 contract call 共用 immutable preview store。Preview 绑定操作类型、链、钱包、目标、value、calldata 和执行模式；execute 只接受 preview ID/token，不接受重新提交的交易参数。顺序任务部分成功标记为 `partial`，逐条结果可用于人工对账。
+
+## 网络边界
+
+默认只监听 `127.0.0.1`。配置任何非回环地址时，启动阶段强制要求至少 32 字节的 `WALLET_BOARD_API_TOKEN`；API 使用 timing-safe Bearer token 校验。Token 是应用层边界，不提供传输加密，远程使用还需 TLS、防火墙和隔离网络。
+
+## Metadata 防护
+
+metadata/media 解析只允许 HTTP(S)，在解析和连接前拒绝 loopback、RFC1918、link-local、ULA、multicast、保留地址及其 IPv4-mapped IPv6 表示；响应体、重定向和超时均有边界。
+
+## 与 1.x 的兼容性变化
+
+- Vanilla JS 与独立 eRPC 被 React/Vite 和进程内 RPC pool 替代。
+- WebSocket 改为 SSE；Mint job 仍通过轮询精确收敛。
+- 项目 `.env` 裸私钥被 AWP profiles 替代，旧私钥不会自动迁移。
+- 支持链从 Ethereum/Robinhood 扩展到七链。
+- 新增 SQLite 和资产管理操作，安全边界相应扩大。
+
+## 变更历史
+
+### 2026-08-14 - 合并多链 Dashboard 2.0
+
+**变更内容**：导入 React/Vite、七链直接监控、AWP 钱包、SQLite、通用资产任务和 ASCII Cats runner；移除旧运行入口。
+
+**变更理由**：将下载版的大规模功能更新纳入受版本管理的 611nft 主线，同时修复审查发现的远程未鉴权、客户端确认、实时详情和任务状态风险。
+
+**影响范围**：安装、钱包迁移、前后端 API、实时协议、RPC 架构、测试、CI 和运维文档。
+
+**决策依据**：下载包无 Git 元数据，按源码快照导入，不伪造祖先关系；旧实现保留于 Git 历史。
