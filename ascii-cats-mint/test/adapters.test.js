@@ -501,6 +501,25 @@ test('Ticket client aborts a request at the configured timeout', async () => {
   );
 });
 
+test('Ticket client timeout also covers a stalled JSON response body', async () => {
+  const client = createTicketClient({
+    url: 'https://example.test/mint-ticket',
+    timeoutMs: 5,
+    fetchFn: async (url, options) => ({
+      ok: true,
+      status: 200,
+      json: async () => new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      }),
+    }),
+  });
+
+  await assert.rejects(
+    client.request(ADDRESS),
+    /Ticket API request failed or timed out/,
+  );
+});
+
 test('Ticket client composes caller cancellation with its hard timeout', async () => {
   const controller = new AbortController();
   let requestSignal;
@@ -530,6 +549,17 @@ test('Ticket client rejects an invalid timeout before fetching', () => {
       fetchFn: async () => ({}),
     }),
     /Ticket API timeout must be a positive integer/,
+  );
+});
+
+test('Ticket client rejects signal-shaped objects without AbortSignal methods', () => {
+  assert.throws(
+    () => createTicketClient({
+      url: 'https://example.test/mint-ticket',
+      signal: { aborted: false },
+      fetchFn: async () => ({}),
+    }),
+    /Ticket API signal must be an AbortSignal/,
   );
 });
 
