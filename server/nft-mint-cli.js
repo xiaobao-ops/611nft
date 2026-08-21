@@ -3,7 +3,7 @@ import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { isAddress } from "viem"
 
-const DEFAULT_API_BASE = process.env.WALLET_BOARD_API_BASE || "http://127.0.0.1:8787"
+const DEFAULT_API_BASE = process.env.WALLET_BOARD_API_BASE || "http://127.0.0.1:8791"
 
 export function parseCliArgs(argv) {
   const result = {
@@ -63,13 +63,13 @@ Options:
   --token-id ID       Token id, default 0
   --concurrency N     Concurrent wallet plans, 0 means all, max 32
   --max-cost ETH      Hard mint-value cap per wallet
-  --wallet ID         Add one local AWP wallet profile (repeatable)
-  --wallets A,B       Add comma-separated local AWP wallet profiles
+  --wallet ID         Add one local wallet profile (repeatable)
+  --wallets A,B       Add comma-separated local wallet profiles
   --send              Broadcast after preview and explicit confirmation
   --yes               Confirm a --send run non-interactively
   --api URL           Local Dashboard API, default ${DEFAULT_API_BASE}
 
-The Dashboard server must be running. Private keys remain inside local AWP profiles.`
+The Dashboard server must be running. Private keys remain in the server-side root .env and are never sent to this CLI.`
 }
 
 async function requestJson(apiBase, path, options = {}) {
@@ -137,7 +137,7 @@ export async function runCli(argv = process.argv.slice(2), { output = console, c
   }
   if (!isAddress(args.contractAddress)) throw new Error("A valid NFT contract address is required")
   if (!Number.isSafeInteger(args.chainId) || args.chainId <= 0) throw new Error("--chain must be a positive integer")
-  if (!args.walletIds.length) throw new Error("Select at least one local AWP wallet with --wallet or --wallets")
+  if (!args.walletIds.length) throw new Error("Select at least one local wallet with --wallet or --wallets")
 
   const { job } = await requestJson(args.apiBase, "/api/nft-mint/preview", {
     method: "POST",

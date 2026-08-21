@@ -1,4 +1,6 @@
-import { decodeEventLog, decodeFunctionData, formatEther, parseAbiItem, toEventSelector, toHex, zeroAddress } from "viem"
+import { decodeEventLog, decodeFunctionData, formatEther, formatGwei, parseAbiItem, toEventSelector, toHex, zeroAddress } from "viem"
+import { createMintIntelService, knownMintMethod } from "./mint-intel.js"
+import { aggregatePendingMints, collectPendingTransactions } from "./pending-mints.js"
 
 export const ERC721_TRANSFER = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)")
 export const ERC1155_TRANSFER_SINGLE = parseAbiItem("event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)")
@@ -125,6 +127,32 @@ const BLOCKSCOUT_BASES = {
   4663: "https://robinhoodchain.blockscout.com",
 }
 
+export function createMintMonitorWssBridge({ chainId, monitor, getManager } = {}) {
+  const id = Number(chainId)
+  return {
+    onWssEvent(value) {
+      if (value?.type === "logs") {
+        const removedLogs = (value.logs || []).filter((log) => log?.removed && log.transactionHash && log.address)
+        const eventIds = [...new Set(removedLogs.map((log) => (
+          `${log.transactionHash}:${String(log.address).toLowerCase()}`
+        )))]
+        const rewindBlock = removedLogs.reduce((lowest, log) => {
+          if (log.blockNumber === null || log.blockNumber === undefined) return lowest
+          const blockNumber = BigInt(log.blockNumber)
+          return lowest === null || blockNumber < lowest ? blockNumber : lowest
+        }, null)
+        if (eventIds.length) monitor.ingestRemoved(id, eventIds, { rewindBlock })
+      }
+      void monitor.scan(id)
+    },
+    onMonitorEvent(value) {
+      if (value?.type !== "monitor_status" || !("scanDurationMs" in value)) return
+      const manager = getManager?.()
+      if (manager && manager.status().state !== "active") manager.recordHttpFallback()
+    },
+  }
+}
+
 function message(error) {
   return error instanceof Error ? error.message : String(error)
 }
@@ -161,12 +189,48 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback
 }
 
-function shortPrice(wei) {
+function chainNativeSymbol(chain) {
+  return String(chain?.nativeSymbol || chain?.viem?.nativeCurrency?.symbol || "").trim() || "—"
+}
+
+function normalizeMintPriceLabel(value, nativeSymbol) {
+  if (value === null || value === undefined) return value
+  const label = String(value).trim().replace(/\bnative(?:[-\s]+token)?\b/gi, nativeSymbol)
+  return /^\d+(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(label) ? `${label} ${nativeSymbol}` : label
+}
+
+function shortPrice(wei, nativeSymbol) {
   if (wei === 0n) return "Free"
   const value = Number(formatEther(wei))
-  if (!Number.isFinite(value)) return `${formatEther(wei)} native`
-  if (value < 0.000001) return `${value.toExponential(2)} native`
-  return `${value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")} native`
+  if (!Number.isFinite(value)) return `${formatEther(wei)} ${nativeSymbol}`
+  if (value < 0.000001) return `${value.toExponential(2)} ${nativeSymbol}`
+  return `${value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")} ${nativeSymbol}`
+}
+
+function mintPlatform(meta) {
+  const value = `${meta?.name || ""} ${meta?.symbol || ""}`.toLowerCase()
+  if (value.includes("art blocks") || value.includes("artblocks")) return "artblocks"
+  if (value.includes("bueno")) return "bueno"
+  if (value.includes("zora")) return "zora"
+  if (value.includes("manifold")) return "manifold"
+  return ""
+}
+
+function compactGwei(value) {
+  if (value === null || value === undefined) return null
+  const text = formatGwei(BigInt(value))
+  return Number(text).toFixed(2).replace(/0+$/, "").replace(/\.$/, "")
+}
+
+function calldataShape(input) {
+  const data = String(input || "")
+  if (!/^0x[0-9a-fA-F]*$/.test(data) || data.length < 10) return { selector: "", calldataBytes: null, parameterCount: null }
+  const payloadHexLength = data.length - 10
+  return {
+    selector: data.slice(0, 10).toLowerCase(),
+    calldataBytes: (data.length - 2) / 2,
+    parameterCount: payloadHexLength % 64 === 0 ? payloadHexLength / 64 : null,
+  }
 }
 
 function mintCount(log) {
@@ -199,19 +263,23 @@ async function readOptional(client, request) {
   }
 }
 
-export async function readCollectionMetadata(client, address, inferredStandard = "ERC721") {
+export async function readCollectionMetadata(client, address, inferredStandard = "ERC721", blockNumber = null) {
+  const supplyRequest = { address, abi: UINT_READ_ABI("totalSupply"), functionName: "totalSupply" }
+  if (blockNumber !== null && blockNumber !== undefined) supplyRequest.blockNumber = BigInt(blockNumber)
   const [name, symbol, erc721, erc1155, totalSupply] = await Promise.all([
     readOptional(client, { address, abi: STRING_READ_ABI("name"), functionName: "name" }),
     readOptional(client, { address, abi: STRING_READ_ABI("symbol"), functionName: "symbol" }),
     readOptional(client, { address, abi: ERC165_ABI, functionName: "supportsInterface", args: ["0x80ac58cd"] }),
     readOptional(client, { address, abi: ERC165_ABI, functionName: "supportsInterface", args: ["0xd9b67a26"] }),
-    readOptional(client, { address, abi: UINT_READ_ABI("totalSupply"), functionName: "totalSupply" }),
+    readOptional(client, supplyRequest),
   ])
 
   const supplyCandidates = ["maxSupply", "MAX_SUPPLY", "collectionSize"]
   let maxSupply = null
   for (const functionName of supplyCandidates) {
-    maxSupply = await readOptional(client, { address, abi: UINT_READ_ABI(functionName), functionName })
+    const request = { address, abi: UINT_READ_ABI(functionName), functionName }
+    if (blockNumber !== null && blockNumber !== undefined) request.blockNumber = BigInt(blockNumber)
+    maxSupply = await readOptional(client, request)
     if (maxSupply !== null) break
   }
 
@@ -221,10 +289,26 @@ export async function readCollectionMetadata(client, address, inferredStandard =
     symbol: String(symbol || ""),
     tokenStandard: erc1155 ? "ERC1155" : erc721 ? "ERC721" : inferredStandard,
     currentSupply: totalSupply === null ? null : totalSupply.toString(),
+    supplyBlockNumber: totalSupply !== null && blockNumber !== null && blockNumber !== undefined ? BigInt(blockNumber).toString() : null,
     maxSupply: maxSupply === null ? null : maxSupply.toString(),
     maxPerWallet: null,
     walletLimitReader: null,
   }
+}
+
+export function applyConfirmedSupply(collection, totalSupply, blockNumber) {
+  if (totalSupply === null || totalSupply === undefined || blockNumber === null || blockNumber === undefined) return false
+  const nextBlock = BigInt(blockNumber)
+  const currentBlock = collection.supplyBlockNumber === null || collection.supplyBlockNumber === undefined
+    ? null
+    : BigInt(collection.supplyBlockNumber)
+  if (currentBlock !== null && nextBlock < currentBlock) return false
+
+  const nextSupply = BigInt(totalSupply).toString()
+  if (currentBlock === nextBlock && collection.currentSupply !== null && collection.currentSupply !== undefined) return false
+  collection.currentSupply = nextSupply
+  collection.supplyBlockNumber = nextBlock.toString()
+  return true
 }
 
 function seaDropStageLimit(input, selector) {
@@ -302,31 +386,27 @@ function publicDropPrice(publicDrop) {
   return publicDrop?.mintPrice ?? publicDrop?.[0] ?? null
 }
 
-async function refreshCollectionState(client, collection, mintedQuantity = 0n, allowSupplyFallback = false) {
+async function refreshCollectionState(client, collection, blockNumber = null) {
+  const supplyRequest = { address: collection.address, abi: UINT_READ_ABI("totalSupply"), functionName: "totalSupply" }
+  if (blockNumber !== null && blockNumber !== undefined) supplyRequest.blockNumber = BigInt(blockNumber)
   const [totalSupply, maxPerWallet] = await Promise.all([
-    readOptional(client, { address: collection.address, abi: UINT_READ_ABI("totalSupply"), functionName: "totalSupply" }),
+    readOptional(client, supplyRequest),
     readWalletLimit(client, collection),
   ])
 
-  if (totalSupply !== null) collection.currentSupply = totalSupply.toString()
-  else if (allowSupplyFallback && collection.currentSupply !== null && mintedQuantity > 0n) {
-    const incremented = BigInt(collection.currentSupply) + mintedQuantity
-    collection.currentSupply = collection.maxSupply === null
-      ? incremented.toString()
-      : (incremented > BigInt(collection.maxSupply) ? BigInt(collection.maxSupply) : incremented).toString()
-  }
+  applyConfirmedSupply(collection, totalSupply, blockNumber)
   if (maxPerWallet !== null) collection.maxPerWallet = maxPerWallet.toString()
 }
 
-function collectionMintPrice(collection, events = collection.events) {
+function collectionMintPrice(collection, nativeSymbol, events = collection.events) {
   if (collection.configuredMintPriceWei !== null && collection.configuredMintPriceWei !== undefined) {
     const raw = String(collection.configuredMintPriceWei)
-    return { label: shortPrice(BigInt(raw)), raw }
+    return { label: shortPrice(BigInt(raw), nativeSymbol), raw }
   }
   const pricedEvent = events.find((event) => event.unitPriceWei !== null && event.unitPriceWei !== undefined)
     || collection.events.find((event) => event.unitPriceWei !== null && event.unitPriceWei !== undefined)
   const raw = pricedEvent?.unitPriceWei ?? collection.lastPriceWei ?? null
-  return { label: raw === null ? "Unknown" : shortPrice(BigInt(raw)), raw }
+  return { label: raw === null ? "Unknown" : shortPrice(BigInt(raw), nativeSymbol), raw }
 }
 
 function collectionMintable(collection) {
@@ -339,7 +419,14 @@ function normalizeProviderRows(payload) {
   const output = {}
   for (const [windowKey, rows] of Object.entries(windows)) {
     if (!Array.isArray(rows)) continue
-    output[windowKey] = rows.filter((row) => /^0x[a-fA-F0-9]{40}$/.test(String(row.address || "")))
+    output[windowKey] = rows
+      .filter((row) => /^0x[a-fA-F0-9]{40}$/.test(String(row.address || "")))
+      .map((row) => ({
+        ...row,
+        twitter: row.twitter || row.x || row.x_url || row.twitter_url || null,
+        website: row.website || row.website_url || null,
+        opensea_url: row.opensea_url || row.openseaUrl || row.opensea || null,
+      }))
   }
   return { ...payload, windows: output }
 }
@@ -352,15 +439,24 @@ export function createMintMonitor({
   pollIntervalMs = Number(process.env.MINT_MONITOR_POLL_MS || 5000),
   initialBlocks = Number(process.env.MINT_MONITOR_INITIAL_BLOCKS || 120),
   maxBlocksPerScan = Number(process.env.MINT_MONITOR_MAX_BLOCKS_PER_SCAN || 160),
-  initialResponseWaitMs = Number(process.env.MINT_MONITOR_INITIAL_RESPONSE_WAIT_MS || 2000),
+  initialResponseWaitMs = Number(process.env.MINT_MONITOR_INITIAL_RESPONSE_WAIT_MS || 750),
+  overviewSupplyWaitMs = Number(process.env.MINT_MONITOR_OVERVIEW_SUPPLY_WAIT_MS || 250),
   providerResponseWaitMs = Number(process.env.MINT_MONITOR_PROVIDER_RESPONSE_WAIT_MS || 300),
+  providerHydrationWaitMs = Number(process.env.MINT_MONITOR_PROVIDER_HYDRATION_WAIT_MS || 400),
   collectionGasWaitMs = Number(process.env.MINT_MONITOR_COLLECTION_GAS_WAIT_MS || 1500),
+  overviewMediaPrewarmWaitMs = Number(process.env.MINT_MONITOR_MEDIA_PREWARM_WAIT_MS || 400),
+  overviewMediaPrewarmConcurrency = Number(process.env.MINT_MONITOR_MEDIA_PREWARM_CONCURRENCY || 24),
   minterStore = null,
   blockscoutBases = BLOCKSCOUT_BASES,
   minterBackfillPageDelayMs = Number(process.env.MINT_MONITOR_MINTER_BACKFILL_PAGE_DELAY_MS || DEFAULT_MINTER_BACKFILL_PAGE_DELAY_MS),
   minterBackfillRetryMs = Number(process.env.MINT_MONITOR_MINTER_BACKFILL_RETRY_MS || DEFAULT_MINTER_BACKFILL_RETRY_MS),
   fetchImpl = fetch,
   autoPoll = true,
+  enableIntel = autoPoll,
+  intelService = null,
+  deployerProfileStore = null,
+  deployerYoungWalletDays = Number(process.env.DEPLOYER_YOUNG_WALLET_DAYS || 7),
+  deployerProjectRiskCount = Number(process.env.DEPLOYER_PROJECT_RISK_COUNT || 5),
 } = {}) {
   const states = new Map()
   const subscribers = new Map()
@@ -370,14 +466,15 @@ export function createMintMonitor({
   const providerCollectionCache = new Map()
   const providerCollectionRequests = new Map()
   const collectionMediaQueue = []
-  const mediaQueue = []
   const pendingCollectionMedia = new Set()
+  const collectionMediaPromises = new Map()
   let activeMediaJobs = 0
   const minterBackfillQueue = []
   const queuedMinterBackfills = new Set()
   const minterBackfillRetryTimers = new Set()
   let activeMinterBackfill = null
   let minterBackfillTimer = null
+  const intel = intelService || createMintIntelService({ fetchImpl, blockscoutBases })
 
   function minterKey(chainId, address) {
     return `${Number(chainId)}:${String(address).toLowerCase()}`
@@ -460,10 +557,10 @@ export function createMintMonitor({
   }
 
   async function processMinterBackfillPage(job) {
-    const progress = minterStore.progress(job.chainId, job.address) || minterStore.ensure(job.chainId, job.address)
-    if (progress.status === "complete") return { complete: true, retry: false }
-    minterStore.markLoading(job.chainId, job.address)
     try {
+      const progress = minterStore.progress(job.chainId, job.address) || minterStore.ensure(job.chainId, job.address)
+      if (progress.status === "complete") return { complete: true, retry: false }
+      minterStore.markLoading(job.chainId, job.address)
       const response = await fetchImpl(blockscoutTransferUrl(job.chainId, job.address, progress.nextPageParams), {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(15000),
@@ -487,7 +584,25 @@ export function createMintMonitor({
       })
       return { complete: snapshot.status === "complete", retry: false }
     } catch (error) {
-      const snapshot = minterStore.markError(job.chainId, job.address, compactError(error))
+      const message = compactError(error)
+      let snapshot
+      try {
+        snapshot = minterStore.markError(job.chainId, job.address, message)
+      } catch (persistenceError) {
+        let persistedProgress = null
+        try {
+          persistedProgress = minterStore.progress(job.chainId, job.address)
+        } catch {
+          // Keep the retry loop alive even while another process owns the database writer lock.
+        }
+        snapshot = {
+          count: 0,
+          status: "error",
+          error: `${message}; 状态写入失败: ${compactError(persistenceError)}`,
+          pagesScanned: Number(persistedProgress?.pagesScanned || 0),
+          updatedAt: persistedProgress?.updatedAt || null,
+        }
+      }
       publish(job.chainId, {
         type: "minter_backfill_update",
         chainId: job.chainId,
@@ -521,7 +636,12 @@ export function createMintMonitor({
     if (outcome.retry) {
       const retryTimer = setTimeout(() => {
         minterBackfillRetryTimers.delete(retryTimer)
-        const progress = minterStore.progress(job.chainId, job.address)
+        let progress = null
+        try {
+          progress = minterStore.progress(job.chainId, job.address)
+        } catch {
+          // A transient lock is retried by re-queueing the same bounded page.
+        }
         if (progress?.status !== "complete" && !queuedMinterBackfills.has(job.key) && activeMinterBackfill?.key !== job.key) {
           queuedMinterBackfills.add(job.key)
           if (job.priority) minterBackfillQueue.unshift(job)
@@ -558,6 +678,19 @@ export function createMintMonitor({
         scanDurationMs: null,
         scannedBlockCount: 0,
         lastScanEventCount: 0,
+        pendingByCollection: new Map(),
+        pendingTrackedCollections: new Set(),
+        pendingSupported: false,
+        pendingCoverage: "unavailable",
+        pendingSources: [],
+        pendingUpdatedAt: null,
+        pendingStats: { transactionCount: 0, decodedTransactionCount: 0, unknownTransactionCount: 0, tokenCount: "0" },
+        chainMetrics: null,
+        metricsCheckedAt: 0,
+        metricsPromise: null,
+        supplyRefreshKey: "",
+        supplyRefreshPromise: null,
+        providerHydrations: new Map(),
         timer: null,
       })
     }
@@ -575,6 +708,267 @@ export function createMintMonitor({
     return () => subscribers.get(id)?.delete(listener)
   }
 
+  function ingestRemoved(chainId, eventIds, { rewindBlock = null } = {}) {
+    const state = stateFor(chainId)
+    const requested = [...new Set((eventIds || []).map(String).filter(Boolean))]
+    if (!requested.length) return []
+    const targets = new Set(requested)
+    const removed = new Set()
+    state.events = state.events.filter((event) => {
+      if (!targets.has(event.id)) return true
+      removed.add(event.id)
+      return false
+    })
+    for (const collection of state.collections.values()) {
+      const retained = []
+      let changed = false
+      for (const event of collection.events || []) {
+        if (targets.has(event.id)) {
+          removed.add(event.id)
+          changed = true
+        } else retained.push(event)
+      }
+      if (!changed) continue
+      collection.events = retained
+      collection.minters = new Set(retained.map((event) => String(event.recipient || "").toLowerCase()).filter(Boolean))
+      collection.lastMintAt = retained[0]?.timestamp || 0
+      collection.lastPriceWei = retained.find((event) => event.unitPriceWei !== null && event.unitPriceWei !== undefined)?.unitPriceWei ?? null
+    }
+    const removedEventIds = requested.filter((eventId) => removed.has(eventId))
+    if (rewindBlock !== null && rewindBlock !== undefined && state.lastScannedBlock !== null) {
+      const rewindTo = BigInt(rewindBlock) - 1n
+      if (rewindTo < state.lastScannedBlock) state.lastScannedBlock = rewindTo
+    }
+    if (removedEventIds.length) {
+      publish(chainId, {
+        type: "discard",
+        chainId: Number(chainId),
+        eventIds: removedEventIds,
+        removedCount: removedEventIds.length,
+      })
+    }
+    return removedEventIds
+  }
+
+  function pendingFields(state, address) {
+    const normalizedAddress = String(address || "").toLowerCase()
+    const available = state.pendingCoverage !== "unavailable" && state.pendingTrackedCollections.has(normalizedAddress)
+    const value = state.pendingByCollection.get(normalizedAddress)
+    return {
+      pending_token_count: available ? value?.tokenCount || "0" : null,
+      pending_unknown_tx_count: available ? Number(value?.unknownTxCount || 0) : 0,
+      pending_transaction_count: available ? Number(value?.transactionCount || 0) : null,
+      pending_coverage: state.pendingCoverage,
+      pending_sources: state.pendingSources.map((source) => ({ name: source.name, ok: source.ok })),
+    }
+  }
+
+  function snapshotData(state, collection) {
+    const pending = pendingFields(state, collection.address)
+    const openseaVerified = Boolean(collection.openseaVerified && collection.openseaUrl)
+    const platformTags = uniqueMessages(collection.platformTags || []).filter((tag) => tag.toLowerCase() !== "opensea" || openseaVerified)
+    return {
+      supply_block_number: collection.supplyBlockNumber || null,
+      current_supply: collection.currentSupply ?? null,
+      max_supply: collection.maxSupply ?? null,
+      ...pending,
+      image_url: collection.imageUrl || null,
+      image_source: collection.imageSource || null,
+      image_updated_at: collection.imageUpdatedAt || null,
+      website: collection.website || null,
+      twitter: collection.twitter || null,
+      discord_url: collection.discordUrl || null,
+      opensea_url: openseaVerified ? collection.openseaUrl : null,
+      opensea_verified: openseaVerified,
+      funding_tags: collection.fundingTags || [],
+      platform_tags: platformTags,
+      status_tags: collection.statusTags || [],
+      contract_created_at: collection.contractCreatedAt || null,
+      contract_created_block: collection.contractCreatedBlock || null,
+      creator_address: collection.creatorAddress || "",
+      deployer_profile: collection.deployerProfile || null,
+    }
+  }
+
+  function applySnapshotToEvent(event, snapshot) {
+    event.collection_snapshot = snapshot
+    event.currentSupply = snapshot.current_supply
+    event.maxSupply = snapshot.max_supply
+    event.pendingCount = snapshot.pending_token_count
+    event.pendingUnknownTxCount = snapshot.pending_unknown_tx_count
+    event.pendingTransactionCount = snapshot.pending_transaction_count
+    event.pendingCoverage = snapshot.pending_coverage
+    event.projectImageUrl = snapshot.image_url || ""
+    event.imageSource = snapshot.image_source || null
+    event.website = snapshot.website || ""
+    event.twitter = snapshot.twitter || ""
+    event.discord_url = snapshot.discord_url || ""
+    event.opensea_url = snapshot.opensea_url || ""
+    event.openseaVerified = snapshot.opensea_verified
+    event.fundingTags = snapshot.funding_tags
+    event.platformTags = snapshot.platform_tags
+    event.statusTags = snapshot.status_tags
+    event.contractCreatedAt = snapshot.contract_created_at
+    event.contractCreatedBlock = snapshot.contract_created_block
+    event.creatorAddress = snapshot.creator_address
+    event.deployerProfile = snapshot.deployer_profile
+  }
+
+  function commitCollectionSnapshot(chainId, state, collection, { broadcast = true } = {}) {
+    const data = snapshotData(state, collection)
+    const fingerprint = JSON.stringify(data)
+    if (collection.snapshotFingerprint === fingerprint && collection.collectionSnapshot) return collection.collectionSnapshot
+    collection.snapshotFingerprint = fingerprint
+    collection.snapshotVersion = Number(collection.snapshotVersion || 0) + 1
+    collection.snapshotUpdatedAt = new Date().toISOString()
+    const snapshot = {
+      version: collection.snapshotVersion,
+      updated_at: collection.snapshotUpdatedAt,
+      ...data,
+    }
+    collection.collectionSnapshot = snapshot
+    collection.platformTags = snapshot.platform_tags
+    for (const event of collection.events || []) applySnapshotToEvent(event, snapshot)
+    if (broadcast) publish(chainId, {
+      type: "collection_update",
+      chainId: Number(chainId),
+      address: collection.address,
+      collection_snapshot: snapshot,
+    })
+    return snapshot
+  }
+
+  function publishStatusMetrics(chainId, state) {
+    publish(chainId, {
+      type: "monitor_status",
+      status: state.status,
+      chainId: Number(chainId),
+      chainMetrics: state.chainMetrics,
+      pendingSupported: state.pendingSupported,
+      pendingCoverage: state.pendingCoverage,
+      pendingSources: state.pendingSources,
+      pendingUpdatedAt: state.pendingUpdatedAt,
+      pendingStats: state.pendingStats,
+      updatedAt: state.updatedAt,
+    })
+  }
+
+  function refreshChainMetrics(chainId, client, state) {
+    if (state.metricsPromise || Date.now() - state.metricsCheckedAt < 10_000) return state.metricsPromise
+    state.metricsCheckedAt = Date.now()
+    state.metricsPromise = (async () => {
+      const [block, fees, gasPrice, explorer] = await Promise.all([
+        client.getBlock({ blockTag: "latest" }).catch(() => null),
+        typeof client.estimateFeesPerGas === "function" ? client.estimateFeesPerGas().catch(() => null) : null,
+        typeof client.getGasPrice === "function" ? client.getGasPrice().catch(() => null) : null,
+        enableIntel ? intel.stats(chainId) : null,
+      ])
+      state.chainMetrics = {
+        blockNumber: state.chainHeadBlock?.toString() || null,
+        maxFeeGwei: compactGwei(fees?.maxFeePerGas),
+        priorityFeeGwei: compactGwei(fees?.maxPriorityFeePerGas),
+        baseFeeGwei: compactGwei(block?.baseFeePerGas),
+        gasPriceGwei: compactGwei(gasPrice),
+        coinPriceUsd: explorer?.coinPriceUsd ?? null,
+        explorerGasGwei: explorer?.explorerGasGwei ?? null,
+        updatedAt: new Date().toISOString(),
+      }
+      publishStatusMetrics(chainId, state)
+      return state.chainMetrics
+    })().finally(() => {
+      state.metricsPromise = null
+    })
+    return state.metricsPromise
+  }
+
+  async function refreshPendingCounts(chainId, client, state) {
+    if (!state.collections.size) return
+    const result = await collectPendingTransactions({
+      client,
+      fetchImpl,
+      blockscoutBase: enableIntel ? blockscoutBases[Number(chainId)] || "" : "",
+    })
+    const collectionKeys = new Set(state.collections.keys())
+    state.pendingTrackedCollections = new Set(collectionKeys)
+    const abiTargets = [...new Set(result.transactions.map((transaction) => transaction.to).filter((address) => collectionKeys.has(address)))]
+    const abiByAddress = new Map()
+    if (enableIntel) {
+      await mapConcurrent(abiTargets, 4, async (address) => {
+        const abi = await intel.contractAbi(chainId, address)
+        if (abi) abiByAddress.set(address, abi)
+      })
+    }
+    state.pendingByCollection = aggregatePendingMints(result.transactions, collectionKeys, abiByAddress)
+    state.pendingCoverage = result.coverage
+    const previousSources = new Map(state.pendingSources.map((source) => [source.name, source]))
+    state.pendingSources = result.sources.map((source) => ({
+      ...source,
+      lastSuccessAt: source.lastSuccessAt || previousSources.get(source.name)?.lastSuccessAt || null,
+    }))
+    state.pendingUpdatedAt = result.updatedAt
+    state.pendingSupported = result.coverage !== "unavailable"
+    let tokenCount = 0n
+    let transactionCount = 0
+    let unknownTransactionCount = 0
+    for (const value of state.pendingByCollection.values()) {
+      tokenCount += BigInt(value.tokenCount)
+      transactionCount += value.transactionCount
+      unknownTransactionCount += value.unknownTxCount
+    }
+    state.pendingStats = {
+      transactionCount,
+      decodedTransactionCount: transactionCount - unknownTransactionCount,
+      unknownTransactionCount,
+      tokenCount: tokenCount.toString(),
+    }
+    for (const collection of state.collections.values()) commitCollectionSnapshot(chainId, state, collection)
+  }
+
+  function enrichMintEvent(chainId, event, meta) {
+    if (!enableIntel) return
+    void Promise.all([
+      intel.collection(chainId, event.address),
+      intel.method({ chainId, selector: event.selector, txHash: event.txHash, target: event.mintTarget || event.address }),
+      intel.marketCollection(chainId, event.address),
+    ]).then(async ([collectionIntel, methodIntel, marketIntel]) => {
+      const deployerProfile = collectionIntel?.creatorAddress && deployerProfileStore
+        ? await deployerProfileStore.get(chainId, collectionIntel.creatorAddress, {
+          youngWalletDays: deployerYoungWalletDays,
+          projectCountThreshold: deployerProjectRiskCount,
+        })
+        : null
+      const platformTags = uniqueMessages([
+        ...(event.platformTags || []),
+        ...(collectionIntel?.platformTags || []).filter((tag) => String(tag).toLowerCase() !== "opensea"),
+        ...(methodIntel?.platformTags || []),
+        ...(marketIntel?.verified ? ["OpenSea"] : []),
+      ])
+      const update = {
+        methodName: methodIntel?.methodName || event.methodName || event.selector || "",
+        contractCreatedAt: collectionIntel?.contractCreatedAt || null,
+        contractCreatedBlock: collectionIntel?.contractCreatedBlock || null,
+        creatorAddress: collectionIntel?.creatorAddress || "",
+        fundingTags: collectionIntel?.fundingTags || [],
+        platformTags,
+        statusTags: collectionIntel?.statusTags || [],
+        website: marketIntel?.website || event.website || "",
+        twitter: marketIntel?.twitter || event.twitter || "",
+        discordUrl: marketIntel?.discordUrl || event.discord_url || "",
+        openseaUrl: marketIntel?.verified ? marketIntel.openseaUrl : "",
+        openseaVerified: Boolean(marketIntel?.verified && marketIntel?.openseaUrl),
+        deployerProfile,
+      }
+      Object.assign(event, update)
+      const collection = stateFor(chainId).collections.get(event.address.toLowerCase())
+      if (collection) {
+        Object.assign(collection, update)
+        commitCollectionSnapshot(chainId, stateFor(chainId), collection)
+      }
+      Object.assign(meta, update)
+      publish(chainId, { type: "mint_update", id: event.id, chainId: Number(chainId), address: event.address, ...update })
+    }).catch(() => {})
+  }
+
   async function settlesWithin(promise, timeoutMs) {
     let timer
     try {
@@ -582,7 +976,6 @@ export function createMintMonitor({
         Promise.resolve(promise).then(() => true),
         new Promise((resolve) => {
           timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs))
-          timer.unref?.()
         }),
       ])
     } finally {
@@ -590,23 +983,64 @@ export function createMintMonitor({
     }
   }
 
+  async function prewarmOverviewMedia(rows) {
+    if (typeof mediaResolver?.loadMedia !== "function") return
+    const ids = uniqueMessages((rows || []).flatMap((row) => [
+      row.image_url,
+      row.image_fallback_url,
+      row.projectImageUrl,
+      row.imageFallbackUrl,
+      row.imageUrl,
+    ]).map((url) => /^\/api\/mint-monitor\/media\/([a-f0-9]{32})(?:[?#].*)?$/i.exec(String(url || ""))?.[1]?.toLowerCase()).filter(Boolean))
+    if (!ids.length) return
+    await mapConcurrent(ids, Math.max(1, Math.min(32, Number(overviewMediaPrewarmConcurrency) || 1)), async (id) => {
+      try {
+        await mediaResolver.loadMedia(id)
+      } catch {
+        // A failed preferred source remains eligible for the browser's next fallback.
+      }
+    })
+  }
+
   function drainMediaQueue() {
-    while (mediaResolver && activeMediaJobs < 4 && (collectionMediaQueue.length || mediaQueue.length)) {
-      const job = collectionMediaQueue.shift() || mediaQueue.shift()
+    while (mediaResolver && activeMediaJobs < 4 && collectionMediaQueue.length) {
+      const job = collectionMediaQueue.shift()
       activeMediaJobs += 1
-      void mediaResolver.resolveToken(job.request).then((tokenMedia) => {
+      void (async () => {
+        const market = job.collectionKey && enableIntel ? await intel.marketCollection(job.event.chainId, job.event.address) : null
+        const resolver = job.collectionKey && typeof mediaResolver.resolveProject === "function"
+          ? mediaResolver.resolveProject.bind(mediaResolver)
+          : mediaResolver.resolveToken.bind(mediaResolver)
+        const tokenMedia = await resolver({ ...job.request, marketImageUrl: market?.imageUrl || "" })
+        const state = stateFor(job.event.chainId)
+        const collection = state.collections.get(job.event.address.toLowerCase())
+        if (job.collectionKey && collection) {
+          collection.imageUrl = tokenMedia?.imageUrl || collection.imageUrl || null
+          collection.imageSource = tokenMedia?.imageSource || (tokenMedia?.imageUrl ? "token_uri" : collection.imageSource || null)
+          collection.imageUpdatedAt = tokenMedia?.imageUrl ? new Date().toISOString() : collection.imageUpdatedAt || null
+          collection.website = tokenMedia?.website || market?.website || collection.website || ""
+          collection.twitter = tokenMedia?.twitter || market?.twitter || collection.twitter || ""
+          collection.discordUrl = tokenMedia?.discordUrl || market?.discordUrl || collection.discordUrl || ""
+          collection.openseaUrl = market?.verified ? market.openseaUrl : collection.openseaUrl || ""
+          collection.openseaVerified = Boolean(market?.verified && market?.openseaUrl) || Boolean(collection.openseaVerified)
+          collection.platformTags = uniqueMessages([
+            ...(collection.platformTags || []).filter((tag) => String(tag).toLowerCase() !== "opensea"),
+            ...(collection.openseaVerified ? ["OpenSea"] : []),
+          ])
+          commitCollectionSnapshot(job.event.chainId, state, collection)
+          job.event.projectImageUrl = collection.imageUrl || ""
+        }
         if (!tokenMedia?.imageUrl) return
-        Object.assign(job.event, {
+        Object.assign(job.event, job.collectionKey ? {
+          projectImageUrl: tokenMedia.imageUrl,
+          imageUrl: tokenMedia.imageUrl,
+          image_url: tokenMedia.imageUrl,
+          tokenName: tokenMedia.tokenName || job.event.tokenName || "",
+        } : {
           imageUrl: tokenMedia.imageUrl,
           image_url: tokenMedia.imageUrl,
           tokenName: tokenMedia.tokenName || "",
         })
-        const state = stateFor(job.event.chainId)
-        const collection = state.collections.get(job.event.address.toLowerCase())
-        if (collection && (!collection.imageUpdatedAt || job.event.timestamp >= collection.imageUpdatedAt)) {
-          collection.imageUrl = tokenMedia.imageUrl
-          collection.imageUpdatedAt = job.event.timestamp
-        }
         publish(job.event.chainId, {
           type: "mint_update",
           id: job.event.id,
@@ -614,12 +1048,15 @@ export function createMintMonitor({
           address: job.event.address,
           txHash: job.event.txHash,
           tokenIds: job.event.tokenIds,
-          imageUrl: tokenMedia.imageUrl,
-          image_url: tokenMedia.imageUrl,
+          ...(job.collectionKey
+            ? { projectImageUrl: tokenMedia.imageUrl, imageUrl: tokenMedia.imageUrl, image_url: tokenMedia.imageUrl, imageSource: tokenMedia.imageSource || "token_uri" }
+            : { imageUrl: tokenMedia.imageUrl, image_url: tokenMedia.imageUrl }),
           tokenName: tokenMedia.tokenName || "",
         })
-      }).finally(() => {
+        return tokenMedia
+      })().catch(() => null).then((result) => job.resolve?.(result)).finally(() => {
         if (job.collectionKey) pendingCollectionMedia.delete(job.collectionKey)
+        if (job.collectionKey) collectionMediaPromises.delete(job.collectionKey)
         activeMediaJobs -= 1
         drainMediaQueue()
       })
@@ -627,18 +1064,82 @@ export function createMintMonitor({
   }
 
   function enqueueMedia(request, event) {
-    if (!mediaResolver || !event.tokenIds[0]) return
+    if (!mediaResolver) return Promise.resolve(null)
     const collectionKey = `${event.chainId}:${event.address.toLowerCase()}`
     const collection = stateFor(event.chainId).collections.get(event.address.toLowerCase())
-    const job = { request: { ...request, tokenId: event.tokenIds[0] }, event }
+    const tokenId = event.tokenIds?.[0] || ""
+    const job = { request: { ...request, tokenId }, event }
     if (!collection?.imageUrl && !pendingCollectionMedia.has(collectionKey)) {
+      let resolve
+      const promise = new Promise((settle) => { resolve = settle })
       pendingCollectionMedia.add(collectionKey)
-      collectionMediaQueue.push({ ...job, collectionKey })
-    } else {
-      mediaQueue.push(job)
-      if (mediaQueue.length > 120) mediaQueue.shift()
+      collectionMediaPromises.set(collectionKey, promise)
+      collectionMediaQueue.push({ ...job, collectionKey, resolve })
     }
     drainMediaQueue()
+    const pending = collectionMediaPromises.get(collectionKey)
+    if (!pending) {
+      if (collection?.collectionSnapshot) applySnapshotToEvent(event, collection.collectionSnapshot)
+      return Promise.resolve(collection?.imageUrl || null)
+    }
+    return pending.then((result) => {
+      const latest = stateFor(event.chainId).collections.get(event.address.toLowerCase())
+      if (latest?.collectionSnapshot) applySnapshotToEvent(event, latest.collectionSnapshot)
+      return result
+    })
+  }
+
+  async function hydrateProviderCollections(chainId, state, rows) {
+    const blockNumber = state.chainHeadBlock
+    if (blockNumber === null) return
+    const client = getClient(chainId)
+    const candidates = [...new Map((rows || [])
+      .filter((row) => /^0x[a-fA-F0-9]{40}$/.test(String(row.address || "")))
+      .map((row) => [row.address.toLowerCase(), row])).values()]
+    await mapConcurrent(candidates, METADATA_FETCH_CONCURRENCY, async (row) => {
+      const key = row.address.toLowerCase()
+      if (state.collections.has(key)) return
+      if (state.providerHydrations.has(key)) return state.providerHydrations.get(key)
+      const pending = (async () => {
+        const metadata = await readCollectionMetadata(client, row.address, row.token_standard || "ERC721", blockNumber)
+        const collection = {
+          ...metadata,
+          events: [],
+          minters: new Set(),
+          lastMintAt: row.last_mint_time || 0,
+          lastPriceWei: row.mint_price_raw ?? null,
+          contractCreatedAt: row.contract_created_at || null,
+          contractCreatedBlock: row.contract_created_block || null,
+          creatorAddress: row.creator_address || "",
+          fundingTags: row.funding_tags || [],
+          platformTags: (row.platform_tags || []).filter((tag) => String(tag).toLowerCase() !== "opensea"),
+          statusTags: row.status_tags || [],
+          website: row.website || "",
+          twitter: row.twitter || "",
+          discordUrl: row.discord_url || "",
+        }
+        state.collections.set(key, collection)
+        state.metadata.set(key, metadata)
+        commitCollectionSnapshot(chainId, state, collection)
+        const preview = row.recent_mint_preview?.[0] || {}
+        const mediaEvent = {
+          id: `provider:${Number(chainId)}:${key}`,
+          chainId: Number(chainId),
+          address: row.address,
+          tokenIds: preview.token_id === null || preview.token_id === undefined ? [] : [String(preview.token_id)],
+          tokenStandard: metadata.tokenStandard,
+          timestamp: Number(row.last_mint_time || Math.floor(Date.now() / 1000)),
+          txHash: preview.tx_hash || "",
+          selector: "",
+          mintTarget: row.address,
+          platformTags: collection.platformTags,
+        }
+        await enqueueMedia({ client, chainId: Number(chainId), address: row.address, tokenStandard: metadata.tokenStandard }, mediaEvent)
+        enrichMintEvent(chainId, mediaEvent, metadata)
+      })().finally(() => state.providerHydrations.delete(key))
+      state.providerHydrations.set(key, pending)
+      await pending
+    })
   }
 
   async function providerOverview() {
@@ -889,13 +1390,16 @@ export function createMintMonitor({
     state.polling = true
     try {
       const chain = getChain(chainId)
+      const nativeSymbol = chainNativeSymbol(chain)
       const client = getClient(chainId)
       const latest = await client.getBlockNumber()
       state.chainHeadBlock = latest
+      void refreshChainMetrics(chainId, client, state)
       let fromBlock = state.lastScannedBlock === null
         ? latest > BigInt(initialBlocks) ? latest - BigInt(initialBlocks) : 0n
         : state.lastScannedBlock + 1n
       if (fromBlock > latest) {
+        await refreshPendingCounts(chainId, client, state)
         state.status = "live"
         state.error = ""
         state.updatedAt = new Date().toISOString()
@@ -916,6 +1420,12 @@ export function createMintMonitor({
           scanDurationMs: state.scanDurationMs,
           scannedBlockCount: 0,
           lastScanEventCount: 0,
+          chainMetrics: state.chainMetrics,
+          pendingSupported: state.pendingSupported,
+          pendingCoverage: state.pendingCoverage,
+          pendingSources: state.pendingSources,
+          pendingUpdatedAt: state.pendingUpdatedAt,
+          pendingStats: state.pendingStats,
         })
         return state
       }
@@ -952,7 +1462,7 @@ export function createMintMonitor({
         }
       }
       await mapConcurrent([...collectionDescriptors.entries()], METADATA_FETCH_CONCURRENCY, async ([key, descriptor]) => {
-        state.metadata.set(key, await readCollectionMetadata(client, descriptor.address, descriptor.standard))
+        state.metadata.set(key, await readCollectionMetadata(client, descriptor.address, descriptor.standard, processedToBlock))
       })
 
       function cachedRead(cache, key, loader) {
@@ -978,6 +1488,8 @@ export function createMintMonitor({
         const gasUsed = BigInt(receipt?.gasUsed || 0n)
         const effectiveGasPrice = BigInt(receipt?.effectiveGasPrice || receipt?.gasPrice || transaction?.gasPrice || 0n)
         const gasFeeWei = gasUsed * effectiveGasPrice
+        const calldata = calldataShape(transaction?.input)
+        const pending = pendingFields(state, address)
         const event = {
           id: `${first.transactionHash}:${address.toLowerCase()}`,
           type: "mint",
@@ -992,59 +1504,83 @@ export function createMintMonitor({
           recipient: eventRecipient,
           minter: transactionSender,
           txHash: first.transactionHash,
+          mintTarget: transaction?.to || address,
           blockNumber: first.blockNumber.toString(),
           timestamp: Number(block?.timestamp || BigInt(Math.floor(Date.now() / 1000))),
           quantity: quantity.toString(),
           tokenIds: ids.slice(0, 20),
           mintValueWei: value === null ? null : value.toString(),
           unitPriceWei: unitPrice === null ? null : unitPrice.toString(),
-          mintPrice: unitPrice === null ? "Unknown" : shortPrice(unitPrice),
+          mintPrice: unitPrice === null ? "Unknown" : shortPrice(unitPrice, nativeSymbol),
           gasUsed: gasUsed ? gasUsed.toString() : null,
+          gasLimit: transaction?.gas === null || transaction?.gas === undefined ? null : transaction.gas.toString(),
           effectiveGasPriceWei: effectiveGasPrice ? effectiveGasPrice.toString() : null,
           gasFeeWei: gasUsed && effectiveGasPrice ? gasFeeWei.toString() : null,
           gasFeeNative: gasUsed && effectiveGasPrice ? formatEther(gasFeeWei) : null,
-          nativeSymbol: chain.nativeSymbol || "ETH",
+          nativeSymbol,
           isFree: value === 0n,
           isAirdrop: value === 0n && transactionSender && transactionSender.toLowerCase() !== eventRecipient.toLowerCase(),
           isMintable: true,
+          confirmed: true,
+          selector: calldata.selector,
+          calldataBytes: calldata.calldataBytes,
+          parameterCount: calldata.parameterCount,
+          currentSupply: meta.currentSupply,
+          maxSupply: meta.maxSupply,
+          platform: mintPlatform(meta),
+          methodName: knownMintMethod(calldata.selector) || calldata.selector,
+          contractCreatedAt: meta.contractCreatedAt || null,
+          contractCreatedBlock: meta.contractCreatedBlock || null,
+          creatorAddress: meta.creatorAddress || "",
+          fundingTags: meta.fundingTags || [],
+          platformTags: uniqueMessages([meta.platform, mintPlatform(meta)]),
+          statusTags: meta.statusTags || [],
+          pendingCount: pending.pending_token_count,
+          pendingUnknownTxCount: pending.pending_unknown_tx_count,
+          pendingTransactionCount: pending.pending_transaction_count,
+          pendingCoverage: pending.pending_coverage,
         }
         return { address, event, meta, quantity, transaction }
       })
 
-      for (const { address, event, meta, quantity, transaction } of enrichedGroups) {
+      const newEntries = []
+      for (const { address, event, meta, transaction } of enrichedGroups) {
         if (existingEventIds.has(event.id)) continue
         existingEventIds.add(event.id)
-        state.events.unshift(event)
         const key = address.toLowerCase()
-        const existedBeforeScan = state.collections.has(key)
         const collection = state.collections.get(key) || { ...meta, events: [], minters: new Set() }
-        collection.events.unshift(event)
-        collection.events = collection.events.slice(0, MAX_COLLECTION_EVENTS)
-        collection.minters.add(event.recipient.toLowerCase())
-        minterStore?.recordMinter(Number(chainId), address, event.recipient)
-        enqueueMinterBackfill(chainId, address)
         collection.lastMintAt = event.timestamp
         if (event.unitPriceWei !== null) collection.lastPriceWei = event.unitPriceWei
         collection.lastMintTransaction = transaction ? { to: transaction.to, input: transaction.input } : null
         collection.isAirdrop = event.isAirdrop
         collection.isMintable = true
         state.collections.set(key, collection)
-        const touched = touchedCollections.get(key) || { collection, quantity: 0n, allowSupplyFallback: existedBeforeScan }
-        touched.quantity += quantity
-        touched.allowSupplyFallback ||= existedBeforeScan
-        touchedCollections.set(key, touched)
+        touchedCollections.set(key, collection)
+        newEntries.push({ address, event, meta, collection })
+      }
+      for (const { address, event, meta, collection } of newEntries) {
+        state.events.unshift(event)
+        collection.events.unshift(event)
+        collection.events = collection.events.slice(0, MAX_COLLECTION_EVENTS)
+        collection.minters.add(event.recipient.toLowerCase())
+        minterStore?.recordMinter(Number(chainId), address, event.recipient)
+        enqueueMinterBackfill(chainId, address)
+        applySnapshotToEvent(event, commitCollectionSnapshot(chainId, state, collection, { broadcast: false }))
         pendingEvents.push(event)
         publish(chainId, event)
-        enqueueMedia({
+        enrichMintEvent(chainId, event, meta)
+        void enqueueMedia({
           client,
           chainId: Number(chainId),
           address,
           tokenStandard: meta.tokenStandard,
-        }, event)
+        }, event).catch(() => null)
       }
-      await mapConcurrent([...touchedCollections.values()], 6, ({ collection, quantity, allowSupplyFallback }) => (
-        refreshCollectionState(client, collection, quantity, allowSupplyFallback)
+      await mapConcurrent([...touchedCollections.values()], 6, (collection) => (
+        refreshCollectionState(client, collection, processedToBlock)
       ))
+      await refreshPendingCounts(chainId, client, state)
+      for (const collection of touchedCollections.values()) commitCollectionSnapshot(chainId, state, collection)
       state.events = state.events.slice(0, MAX_EVENTS_PER_CHAIN)
       state.lastScannedBlock = processedToBlock
       state.backlogBlockCount = Number(latest - processedToBlock)
@@ -1067,6 +1603,12 @@ export function createMintMonitor({
         scanDurationMs: state.scanDurationMs,
         scannedBlockCount: state.scannedBlockCount,
         lastScanEventCount: state.lastScanEventCount,
+        chainMetrics: state.chainMetrics,
+        pendingSupported: state.pendingSupported,
+        pendingCoverage: state.pendingCoverage,
+        pendingSources: state.pendingSources,
+        pendingUpdatedAt: state.pendingUpdatedAt,
+        pendingStats: state.pendingStats,
       })
     } catch (error) {
       state.status = "degraded"
@@ -1092,21 +1634,81 @@ export function createMintMonitor({
     return state
   }
 
-  function directOverview(chainId, windowSeconds = DEFAULT_WINDOW_SECONDS) {
-    const state = stateFor(chainId)
+  async function refreshOverviewSupplies(chainId, state, windowSeconds) {
+    if (state.chainHeadBlock === null) return
     const seconds = ALLOWED_WINDOWS.has(Number(windowSeconds)) ? Number(windowSeconds) : DEFAULT_WINDOW_SECONDS
     const cutoff = Math.floor(Date.now() / 1000) - seconds
+    const targets = [...state.collections.values()]
+      .filter((collection) => collection.events.some((event) => event.timestamp >= cutoff))
+      .sort((a, b) => Number(b.lastMintAt || 0) - Number(a.lastMintAt || 0))
+      .slice(0, 120)
+    if (!targets.length) return
+    const blockNumber = BigInt(state.chainHeadBlock)
+    const refreshKey = `${blockNumber}:${targets.map((collection) => collection.address.toLowerCase()).join(",")}`
+    if (state.supplyRefreshKey === refreshKey) return
+    if (state.supplyRefreshPromise) return state.supplyRefreshPromise
+    state.supplyRefreshPromise = (async () => {
+      const client = getClient(chainId)
+      let supplies = null
+      if (typeof client.multicall === "function") {
+        try {
+          const results = await client.multicall({
+            allowFailure: true,
+            blockNumber,
+            contracts: targets.map((collection) => ({
+              address: collection.address,
+              abi: UINT_READ_ABI("totalSupply"),
+              functionName: "totalSupply",
+            })),
+          })
+          supplies = results.map((result) => result?.status === "success" ? result.result : null)
+        } catch {
+          supplies = null
+        }
+      }
+      if (!supplies) {
+        supplies = await mapConcurrent(targets, 8, (collection) => readOptional(client, {
+          address: collection.address,
+          abi: UINT_READ_ABI("totalSupply"),
+          functionName: "totalSupply",
+          blockNumber,
+        }))
+      }
+      targets.forEach((collection, index) => {
+        if (supplies[index] === null) return
+        if (applyConfirmedSupply(collection, supplies[index], blockNumber)) {
+          commitCollectionSnapshot(chainId, state, collection)
+        }
+      })
+      state.supplyRefreshKey = refreshKey
+    })().finally(() => {
+      state.supplyRefreshPromise = null
+    })
+    return state.supplyRefreshPromise
+  }
+
+  function directOverview(chainId, windowSeconds = DEFAULT_WINDOW_SECONDS) {
+    const state = stateFor(chainId)
+    const chain = getChain(chainId)
+    const nativeSymbol = chainNativeSymbol(chain)
+    const seconds = ALLOWED_WINDOWS.has(Number(windowSeconds)) ? Number(windowSeconds) : DEFAULT_WINDOW_SECONDS
+    const cutoff = Math.floor(Date.now() / 1000) - seconds
+    for (const event of state.events) {
+      const collection = state.collections.get(String(event.address || "").toLowerCase())
+      if (collection) applySnapshotToEvent(event, commitCollectionSnapshot(chainId, state, collection, { broadcast: false }))
+    }
     const rows = [...state.collections.values()].map((collection) => {
+      const snapshot = commitCollectionSnapshot(chainId, state, collection, { broadcast: false })
       const recent = collection.events.filter((event) => event.timestamp >= cutoff)
       const recentMints = recent.reduce((sum, event) => sum + toNumber(event.quantity), 0)
-      const price = collectionMintPrice(collection, recent)
+      const price = collectionMintPrice(collection, nativeSymbol, recent)
       return {
         address: collection.address,
         name: collection.name,
         symbol: collection.symbol,
         token_standard: collection.tokenStandard,
-        current_supply: collection.currentSupply,
-        max_supply: collection.maxSupply,
+        current_supply: snapshot.current_supply,
+        max_supply: snapshot.max_supply,
         max_per_wallet: collection.maxPerWallet ?? null,
         recent_mints: recentMints,
         ...minterFields(chainId, collection),
@@ -1115,10 +1717,29 @@ export function createMintMonitor({
         is_airdrop: recent.some((event) => event.isAirdrop),
         is_mintable: collectionMintable(collection),
         last_mint_time: collection.lastMintAt,
-        chain: getChain(chainId).key,
+        chain: chain.key,
         chainId: Number(chainId),
+        native_symbol: nativeSymbol,
         source: "direct_rpc",
-        image_url: collection.imageUrl || recent.find((event) => event.imageUrl)?.imageUrl || null,
+        image_url: snapshot.image_url,
+        image_source: snapshot.image_source,
+        contract_created_at: collection.contractCreatedAt || null,
+        contract_created_block: collection.contractCreatedBlock || null,
+        creator_address: collection.creatorAddress || "",
+        deployer_profile: snapshot.deployer_profile,
+        pending_count: snapshot.pending_token_count,
+        pending_unknown_tx_count: snapshot.pending_unknown_tx_count,
+        pending_transaction_count: snapshot.pending_transaction_count,
+        pending_coverage: snapshot.pending_coverage,
+        website: snapshot.website,
+        twitter: snapshot.twitter,
+        discord_url: snapshot.discord_url,
+        opensea_url: snapshot.opensea_url,
+        opensea_verified: snapshot.opensea_verified,
+        funding_tags: snapshot.funding_tags,
+        platform_tags: snapshot.platform_tags,
+        status_tags: snapshot.status_tags,
+        collection_snapshot: snapshot,
         recent_mint_preview: recent.slice(0, MAX_OVERVIEW_COLLECTION_EVENTS).map(recentMintPayload),
       }
     }).filter((row) => row.recent_mints > 0).sort((a, b) => b.recent_mints - a.recent_mints)
@@ -1139,6 +1760,13 @@ export function createMintMonitor({
       scanDurationMs: state.scanDurationMs,
       scannedBlockCount: state.scannedBlockCount,
       lastScanEventCount: state.lastScanEventCount,
+      chainMetrics: state.chainMetrics,
+      pendingSupported: state.pendingSupported,
+      pendingCoverage: state.pendingCoverage,
+      pendingSources: state.pendingSources,
+      pendingUpdatedAt: state.pendingUpdatedAt,
+      pendingStats: state.pendingStats,
+      nativeSymbol,
       windows: { [String(seconds)]: rows },
       events: state.events.filter((event) => event.timestamp >= cutoff).slice(0, 100),
     }
@@ -1148,41 +1776,140 @@ export function createMintMonitor({
     const state = ensure(chainId)
     const scanRequest = scan(chainId)
     if (state.lastScannedBlock === null) await settlesWithin(scanRequest, initialResponseWaitMs)
+    const supplyRefresh = refreshOverviewSupplies(chainId, state, windowSeconds)
+    if (!(await settlesWithin(supplyRefresh, overviewSupplyWaitMs))) void supplyRefresh.catch(() => {})
 
     const providerRequest = providerOverview()
     await settlesWithin(providerRequest, providerResponseWaitMs)
     const provider = providerCache
     const chain = getChain(chainId)
+    const nativeSymbol = chainNativeSymbol(chain)
     if (provider) {
       const seconds = ALLOWED_WINDOWS.has(Number(windowSeconds)) ? Number(windowSeconds) : DEFAULT_WINDOW_SECONDS
-      const rows = (provider.windows?.[String(seconds)] || []).filter((row) => (
+      const directRows = directOverview(chainId, seconds).windows[String(seconds)] || []
+      const providerRows = (provider.windows?.[String(seconds)] || []).filter((row) => (
         !row.chain || row.chain === chain.key || (chain.key === "robinhood" && row.chain === "hood")
-      )).map((row) => {
+      ))
+      const hydration = hydrateProviderCollections(chainId, state, providerRows)
+      if (!(await settlesWithin(hydration, providerHydrationWaitMs))) void hydration.catch(() => {})
+      void hydration.then(() => refreshPendingCounts(chainId, getClient(chainId), state)).catch(() => {})
+      const providerBackedRows = providerRows.map((row) => {
         const local = state.collections.get(String(row.address).toLowerCase())
+        const snapshot = local ? commitCollectionSnapshot(chainId, state, local, { broadcast: false }) : null
         const minters = local || { address: row.address, minters: new Set() }
-        const localPrice = local ? collectionMintPrice(local) : null
+        const localPrice = local ? collectionMintPrice(local, nativeSymbol) : null
+        const providerImage = mediaResolver ? mediaResolver.registerMedia?.(row.image_url, "0") : row.image_url || null
+        const collectionSnapshot = snapshot || {
+          version: 0,
+          updated_at: row.updated_at || provider.updatedAt || null,
+          supply_block_number: null,
+          current_supply: row.current_supply ?? null,
+          max_supply: row.max_supply ?? null,
+          pending_token_count: null,
+          pending_unknown_tx_count: 0,
+          pending_transaction_count: null,
+          pending_coverage: "unavailable",
+          pending_sources: [],
+          image_url: providerImage,
+          image_source: providerImage ? "provider" : null,
+          image_updated_at: null,
+          website: row.website || null,
+          twitter: row.twitter || null,
+          discord_url: row.discord_url || null,
+          opensea_url: null,
+          opensea_verified: false,
+          funding_tags: row.funding_tags || [],
+          platform_tags: (row.platform_tags || []).filter((tag) => String(tag).toLowerCase() !== "opensea"),
+          status_tags: row.status_tags || [],
+        }
         enqueueMinterBackfill(chainId, row.address)
         return {
           ...row,
-          current_supply: local?.currentSupply ?? row.current_supply,
-          max_supply: local?.maxSupply ?? row.max_supply,
+          current_supply: collectionSnapshot.current_supply,
+          max_supply: collectionSnapshot.max_supply,
           max_per_wallet: local?.maxPerWallet ?? row.max_per_wallet ?? null,
-          mint_price: localPrice?.label ?? row.mint_price,
+          mint_price: localPrice?.label ?? normalizeMintPriceLabel(row.mint_price, nativeSymbol),
           mint_price_raw: localPrice?.raw ?? row.mint_price_raw ?? null,
+          native_symbol: nativeSymbol,
           is_mintable: local ? collectionMintable(local) : row.is_mintable,
           ...minterFields(chainId, minters),
-          image_url: mediaResolver ? mediaResolver.registerMedia?.(row.image_url, "0") : row.image_url || null,
-          recent_mint_preview: local?.events.slice(0, MAX_OVERVIEW_COLLECTION_EVENTS).map(recentMintPayload) || [],
+          image_url: collectionSnapshot.image_url,
+          image_source: collectionSnapshot.image_source,
+          image_fallback_url: providerImage && providerImage !== collectionSnapshot.image_url ? providerImage : null,
+          pending_count: collectionSnapshot.pending_token_count,
+          pending_unknown_tx_count: collectionSnapshot.pending_unknown_tx_count,
+          pending_transaction_count: collectionSnapshot.pending_transaction_count,
+          pending_coverage: collectionSnapshot.pending_coverage,
+          contract_created_at: local?.contractCreatedAt ?? row.contract_created_at ?? null,
+          contract_created_block: local?.contractCreatedBlock ?? row.contract_created_block ?? null,
+          creator_address: local?.creatorAddress ?? row.creator_address ?? "",
+          website: collectionSnapshot.website,
+          twitter: collectionSnapshot.twitter,
+          discord_url: collectionSnapshot.discord_url,
+          opensea_url: collectionSnapshot.opensea_url,
+          opensea_verified: collectionSnapshot.opensea_verified,
+          funding_tags: collectionSnapshot.funding_tags,
+          platform_tags: collectionSnapshot.platform_tags,
+          status_tags: collectionSnapshot.status_tags,
+          collection_snapshot: collectionSnapshot,
+          recent_mint_preview: local?.events.length
+            ? local.events.slice(0, MAX_OVERVIEW_COLLECTION_EVENTS).map(recentMintPayload)
+            : Array.isArray(row.recent_mint_preview)
+              ? row.recent_mint_preview.map((event) => ({
+                ...event,
+                mint_price: normalizeMintPriceLabel(event.mint_price, nativeSymbol),
+                native_symbol: nativeSymbol,
+              }))
+              : [],
         }
       })
-      return { ...provider, source: "provider", mode: "live", providerError: "", windows: { [String(seconds)]: rows }, events: stateFor(chainId).events.slice(0, 100) }
+      const providerAddresses = new Set(providerBackedRows.map((row) => String(row.address || "").toLowerCase()))
+      const rows = [
+        ...providerBackedRows,
+        ...directRows.filter((row) => !providerAddresses.has(String(row.address || "").toLowerCase())),
+      ]
+      const events = stateFor(chainId).events.slice(0, 100)
+      const mediaPrewarm = prewarmOverviewMedia([...rows, ...events])
+      if (!(await settlesWithin(mediaPrewarm, overviewMediaPrewarmWaitMs))) void mediaPrewarm.catch(() => {})
+      return {
+        ...provider,
+        source: "provider",
+        mode: state.status,
+        error: state.error,
+        providerError: "",
+        updatedAt: state.updatedAt,
+        scanStrategy: state.scanStrategy,
+        scanDiagnostics: state.scanDiagnostics,
+        coverageLimited: state.coverageLimited,
+        coverageFromBlock: state.coverageFromBlock?.toString() || null,
+        latestBlock: state.lastScannedBlock?.toString() || null,
+        chainHeadBlock: state.chainHeadBlock?.toString() || null,
+        backlogBlockCount: state.backlogBlockCount,
+        scanDurationMs: state.scanDurationMs,
+        scannedBlockCount: state.scannedBlockCount,
+        lastScanEventCount: state.lastScanEventCount,
+        chainMetrics: state.chainMetrics,
+        pendingSupported: state.pendingSupported,
+        pendingCoverage: state.pendingCoverage,
+        pendingSources: state.pendingSources,
+        pendingUpdatedAt: state.pendingUpdatedAt,
+        pendingStats: state.pendingStats,
+        nativeSymbol,
+        windows: { [String(seconds)]: rows },
+        events,
+      }
     }
-    return directOverview(chainId, windowSeconds)
+    const direct = directOverview(chainId, windowSeconds)
+    const rows = direct.windows?.[String(ALLOWED_WINDOWS.has(Number(windowSeconds)) ? Number(windowSeconds) : DEFAULT_WINDOW_SECONDS)] || []
+    const mediaPrewarm = prewarmOverviewMedia([...rows, ...(direct.events || [])])
+    if (!(await settlesWithin(mediaPrewarm, overviewMediaPrewarmWaitMs))) void mediaPrewarm.catch(() => {})
+    return direct
   }
 
   function recentMintPayload(event) {
     return {
       timestamp: event.timestamp,
+      block_number: event.blockNumber || null,
       to_address: event.recipient,
       token_id: event.tokenIds[0] || null,
       quantity: event.quantity,
@@ -1193,6 +1920,7 @@ export function createMintMonitor({
       gas_used: event.gasUsed,
       gas_fee_wei: event.gasFeeWei,
       gas_fee_native: event.gasFeeNative,
+      native_symbol: event.nativeSymbol,
       image_url: event.imageUrl || null,
       token_name: event.tokenName || null,
     }
@@ -1200,39 +1928,65 @@ export function createMintMonitor({
 
   function directCollection(chainId, address, provider = null) {
     const state = stateFor(chainId)
+    const nativeSymbol = chainNativeSymbol(getChain(chainId))
     const entry = state.collections.get(address.toLowerCase())
     if (!entry) return null
-    const providerImage = provider?.image_url
-      ? (mediaResolver ? mediaResolver.registerMedia?.(provider.image_url, "0") : provider.image_url)
-      : null
-    const price = collectionMintPrice(entry)
+    const snapshot = commitCollectionSnapshot(chainId, state, entry, { broadcast: false })
+    const price = collectionMintPrice(entry, nativeSymbol)
+    const providerRecentMints = Array.isArray(provider?.recent_mints)
+      ? provider.recent_mints.map((event) => ({
+        ...event,
+        mint_price: normalizeMintPriceLabel(event.mint_price, nativeSymbol),
+        native_symbol: nativeSymbol,
+      }))
+      : []
     return {
       source: "direct_rpc",
       address: entry.address,
       name: entry.name,
       symbol: entry.symbol,
       token_standard: entry.tokenStandard,
-      current_supply: entry.currentSupply,
-      max_supply: entry.maxSupply,
+      current_supply: snapshot.current_supply,
+      max_supply: snapshot.max_supply,
       ...minterFields(chainId, entry),
       mint_price: price.label,
       mint_price_raw: price.raw,
+      native_symbol: nativeSymbol,
       max_per_wallet: provider?.max_per_wallet ?? entry.maxPerWallet ?? null,
       floor_price_eth: provider?.floor_price_eth ?? null,
-      website: provider?.website || null,
-      twitter: provider?.twitter || null,
-      discord_url: provider?.discord_url || null,
+      website: snapshot.website || provider?.website || null,
+      twitter: snapshot.twitter || provider?.twitter || null,
+      discord_url: snapshot.discord_url || provider?.discord_url || null,
+      opensea_url: snapshot.opensea_url,
+      opensea_verified: snapshot.opensea_verified,
       last_mint_time: entry.lastMintAt,
       is_airdrop: entry.events.some((event) => event.isAirdrop),
       is_mintable: collectionMintable(entry),
-      image_url: entry.imageUrl || entry.events.find((event) => event.imageUrl)?.imageUrl || providerImage || null,
-      recent_mints: entry.events.map(recentMintPayload),
+      contract_created_at: entry.contractCreatedAt || null,
+      contract_created_block: entry.contractCreatedBlock || null,
+      creator_address: entry.creatorAddress || "",
+      deployer_profile: snapshot.deployer_profile,
+      pending_count: snapshot.pending_token_count,
+      pending_unknown_tx_count: snapshot.pending_unknown_tx_count,
+      pending_transaction_count: snapshot.pending_transaction_count,
+      pending_coverage: snapshot.pending_coverage,
+      funding_tags: snapshot.funding_tags,
+      platform_tags: snapshot.platform_tags,
+      status_tags: snapshot.status_tags,
+      image_url: snapshot.image_url,
+      image_source: snapshot.image_source,
+      image_fallback_url: null,
+      collection_snapshot: snapshot,
+      recent_mints: entry.events.length > 0
+        ? entry.events.map(recentMintPayload)
+        : providerRecentMints,
     }
   }
 
   async function collection(chainId, address) {
     const state = ensure(chainId)
     const chain = getChain(chainId)
+    const nativeSymbol = chainNativeSymbol(chain)
     const chainKey = chain.key === "robinhood" ? "hood" : chain.key
     enqueueMinterBackfill(chainId, address, { priority: true })
 
@@ -1240,15 +1994,25 @@ export function createMintMonitor({
     // polling the next block or waiting for optional third-party enrichment.
     let direct = directCollection(chainId, address, cachedProviderCollection(address, chainKey))
     if (direct) {
-      await settlesWithin(enrichCollectionGas(getClient(chainId), state.collections.get(address.toLowerCase())), collectionGasWaitMs)
-      void providerCollection(address, chainKey)
+      const entry = state.collections.get(address.toLowerCase())
+      await settlesWithin(enrichCollectionGas(getClient(chainId), entry), collectionGasWaitMs)
+      const providerRequest = providerCollection(address, chainKey)
+      if (entry.events.length === 0 && !cachedProviderCollection(address, chainKey)) {
+        await settlesWithin(providerRequest, providerResponseWaitMs)
+      } else {
+        void providerRequest
+      }
       return directCollection(chainId, address, cachedProviderCollection(address, chainKey))
     }
 
     // Direct API visits can briefly join the initial scan, but must never inherit
     // an unbounded RPC scan latency. The scan continues in the background.
     if (state.lastScannedBlock === null) {
-      await settlesWithin(state.scanPromise || scan(chainId), initialResponseWaitMs)
+      const scanRequest = state.scanPromise || scan(chainId)
+      // With no provider fallback configured there is no optional enrichment to
+      // wait for; return the local snapshot while the direct scan progresses.
+      if (providerBase) await settlesWithin(scanRequest, initialResponseWaitMs)
+      else void scanRequest.catch(() => {})
     }
     direct = directCollection(chainId, address, cachedProviderCollection(address, chainKey))
     if (direct) {
@@ -1263,11 +2027,48 @@ export function createMintMonitor({
     await settlesWithin(providerRequest, providerResponseWaitMs)
     const provider = cachedProviderCollection(address, chainKey)
     if (!provider) return null
+    const providerImage = mediaResolver ? mediaResolver.registerMedia?.(provider.image_url, "0") : provider.image_url || null
+    const providerSnapshot = {
+      version: 0,
+      updated_at: provider.updated_at || null,
+      supply_block_number: null,
+      current_supply: provider.current_supply ?? null,
+      max_supply: provider.max_supply ?? null,
+      pending_token_count: null,
+      pending_unknown_tx_count: 0,
+      pending_transaction_count: null,
+      pending_coverage: "unavailable",
+      pending_sources: [],
+      image_url: providerImage,
+      image_source: providerImage ? "provider" : null,
+      image_updated_at: null,
+      website: provider.website || null,
+      twitter: provider.twitter || null,
+      discord_url: provider.discord_url || null,
+      opensea_url: null,
+      opensea_verified: false,
+      funding_tags: provider.funding_tags || [],
+      platform_tags: (provider.platform_tags || []).filter((tag) => String(tag).toLowerCase() !== "opensea"),
+      status_tags: provider.status_tags || [],
+    }
     return {
       ...provider,
       source: "provider",
+      mint_price: normalizeMintPriceLabel(provider.mint_price, nativeSymbol),
+      native_symbol: nativeSymbol,
+      recent_mints: Array.isArray(provider.recent_mints)
+        ? provider.recent_mints.map((event) => ({
+          ...event,
+          mint_price: normalizeMintPriceLabel(event.mint_price, nativeSymbol),
+          native_symbol: nativeSymbol,
+        }))
+        : provider.recent_mints,
       ...minterFields(chainId, { address, minters: new Set() }),
-      image_url: mediaResolver ? mediaResolver.registerMedia?.(provider.image_url, "0") : provider.image_url || null,
+      opensea_url: null,
+      opensea_verified: false,
+      image_url: providerImage,
+      image_source: providerSnapshot.image_source,
+      collection_snapshot: providerSnapshot,
     }
   }
 
@@ -1292,6 +2093,12 @@ export function createMintMonitor({
       lastScanEventCount: state.lastScanEventCount,
       collectionCount: state.collections.size,
       eventCount: state.events.length,
+      chainMetrics: state.chainMetrics,
+      pendingSupported: state.pendingSupported,
+      pendingCoverage: state.pendingCoverage,
+      pendingSources: state.pendingSources,
+      pendingUpdatedAt: state.pendingUpdatedAt,
+      pendingStats: state.pendingStats,
     }
   }
 
@@ -1302,5 +2109,5 @@ export function createMintMonitor({
     minterBackfillRetryTimers.clear()
   }
 
-  return { collection, directOverview, ensure, overview, scan, status, stop, subscribe }
+  return { collection, directOverview, ensure, ingestRemoved, overview, scan, status, stop, subscribe }
 }

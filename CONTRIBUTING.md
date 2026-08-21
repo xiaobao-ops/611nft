@@ -12,7 +12,7 @@ cp .env.example .env
 npm test
 ```
 
-Node.js 需要 22 或更高版本。钱包写操作的本地验证还需要独立安装 `awp-wallet`。
+Node.js 需要 22 或更高版本。钱包写操作的本地验证使用根 `.env` 中的专用低余额测试钱包；严禁提交或粘贴真实私钥。
 
 ## Git worktree 协作
 

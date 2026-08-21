@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>NFT TOOL 业务模块</title>
+    <link rel="stylesheet" href="/nfttool-runtime/styles.css" />
+  </head>
+  <body>
+    <main id="app" aria-live="polite">
+      <div class="boot-state">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>正在读取钱包数据</span>
+      </div>
+    </main>
+    <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+    <div id="dialog-root"></div>
+    <script type="module" src="/nfttool-runtime/app.js"></script>
+  </body>
+</html>

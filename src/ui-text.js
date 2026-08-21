@@ -1,0 +1,1 @@
+../apps/nfttool/src/workspace/ui-text.js

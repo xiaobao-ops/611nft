@@ -23,7 +23,7 @@
 ## Operational guidance
 
 - 使用专用低余额钱包，不要复用长期资产钱包。
-- `.env`、AWP profile 和 SQLite 应按敏感数据保护，运行机器应启用磁盘加密和屏幕锁。
+- 根 `.env` 和 SQLite 应按敏感数据保护，`.env` 权限保持 `600`，运行机器应启用磁盘加密和屏幕锁。
 - 默认保持 `WALLET_BOARD_API_HOST=127.0.0.1`。非回环监听必须设置高强度 `WALLET_BOARD_API_TOKEN`，并同时配置 TLS、防火墙与网络隔离。
 - 不要把 Bearer token 放入 URL、截图、Issue、日志或 shell 历史。
 - 广播前核对链、合约、calldata、数量、价格、Gas 和接收地址。

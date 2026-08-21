@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "611nft local-first multi-chain NFT mint monitor and AWP wallet console",
+  "description": "611nft local-first multi-chain NFT mint monitor and wallet console",
   "license": "MIT",
   "author": "Zerorisklabs-V1",
   "repository": {
@@ -23,13 +23,17 @@
     "multi-wallet",
     "ethereum",
     "robinhood-chain",
-    "awp-wallet"
+    "local-wallet"
   ],
   "scripts": {
-    "dev": "concurrently -k \"npm:server\" \"npm:client\"",
+    "dev": "concurrently -k \"npm:server\" \"npm:client:tool\" \"npm:client:opensea\"",
     "server": "node --experimental-sqlite server/index.js",
     "client": "vite",
-    "build": "vite build",
+    "client:tool": "npm --prefix apps/nfttool run start:local",
+    "client:opensea": "vite --host 127.0.0.1 --port 5173",
+    "build:opensea": "vite build",
+    "build:tool": "npm --prefix apps/nfttool run build",
+    "build": "npm run build:opensea && npm run build:tool",
     "preview": "vite preview",
     "mint": "node server/nft-mint-cli.js",
     "test": "node --test test/*.test.js",

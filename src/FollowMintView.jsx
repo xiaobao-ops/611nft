@@ -1,0 +1,1 @@
+../apps/nfttool/src/workspace/FollowMintView.jsx

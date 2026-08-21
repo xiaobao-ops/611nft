@@ -15,11 +15,11 @@ test("confirmed task execution sends only the server preview credentials", () =>
     previewId: "preview-1",
     confirmationToken: "secret-token",
   })
-  assert.match(confirmedTaskPrompt("Execute approval task?", plan), /2 transactions/)
+  assert.match(confirmedTaskPrompt("执行授权任务？", plan), /提交 2 笔交易/)
 })
 
 test("missing confirmation credentials fail before a task request is sent", () => {
-  assert.throws(() => confirmedTaskRequest({ confirmation: {} }), /confirmation credentials/)
+  assert.throws(() => confirmedTaskRequest({ confirmation: {} }), /确认凭据/)
 })
 
 test("operation output recursively redacts confirmation tokens", () => {
@@ -27,7 +27,7 @@ test("operation output recursively redacts confirmation tokens", () => {
     confirmation: { previewId: "preview-1", confirmationToken: "secret-token" },
     nested: [{ confirmationToken: "second-secret" }],
   }), {
-    confirmation: { previewId: "preview-1", confirmationToken: "[redacted]" },
-    nested: [{ confirmationToken: "[redacted]" }],
+    confirmation: { previewId: "preview-1", confirmationToken: "[已隐藏]" },
+    nested: [{ confirmationToken: "[已隐藏]" }],
   })
 })

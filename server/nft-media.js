@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto"
 import { lookup as dnsLookup } from "node:dns/promises"
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { isIP } from "node:net"
+import { join } from "node:path"
 
 const TOKEN_URI_ABI = [{
   type: "function",
@@ -47,6 +49,15 @@ function tokenHex(tokenId) {
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))]
+}
+
+async function firstSuccessful(values, task, label) {
+  try {
+    return await Promise.any(values.map(task))
+  } catch (error) {
+    const errors = error instanceof AggregateError ? error.errors : [error]
+    throw new Error(`${label}: ${unique(errors.map(text)).join("; ")}`)
+  }
 }
 
 function nftUriCandidates(value, tokenId = "0") {
@@ -128,7 +139,14 @@ export function isPrivateIp(address) {
     normalized.startsWith("fea") || normalized.startsWith("feb") || normalized.startsWith("ff")
 }
 
-async function assertPublicUrl(value, lookupImpl) {
+function isSyntheticProxyIp(address) {
+  const normalized = mappedIpv4(address) || address
+  if (isIP(normalized) !== 4) return false
+  const [first, second] = normalized.split(".").map(Number)
+  return first === 198 && (second === 18 || second === 19)
+}
+
+async function assertPublicUrl(value, lookupImpl, proxyDnsActive) {
   const url = new URL(value)
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only HTTP(S) NFT media URLs are supported")
   if (url.username || url.password) throw new Error("NFT media URL credentials are not allowed")
@@ -137,7 +155,9 @@ async function assertPublicUrl(value, lookupImpl) {
     throw new Error("Local NFT media hosts are not allowed")
   }
   const addresses = isIP(hostname) ? [{ address: hostname }] : await lookupImpl(hostname, { all: true })
-  if (!addresses.length || addresses.some((entry) => isPrivateIp(entry.address))) {
+  const syntheticProxyMapping = !isIP(hostname) && addresses.length > 0 &&
+    addresses.every((entry) => isSyntheticProxyIp(entry.address)) && await proxyDnsActive()
+  if (!addresses.length || (!syntheticProxyMapping && addresses.some((entry) => isPrivateIp(entry.address)))) {
     throw new Error("Private NFT media hosts are not allowed")
   }
   return url
@@ -170,13 +190,14 @@ async function readLimited(response, maxBytes) {
 async function fetchPublicBytes(uri, {
   fetchImpl,
   lookupImpl,
+  proxyDnsActive,
   maxBytes,
   timeoutMs,
   redirects = 3,
 }) {
   let current = uri
   for (let redirect = 0; redirect <= redirects; redirect += 1) {
-    await assertPublicUrl(current, lookupImpl)
+    await assertPublicUrl(current, lookupImpl, proxyDnsActive)
     const response = await fetchImpl(current, {
       headers: { accept: "application/json,image/avif,image/webp,image/png,image/jpeg,image/svg+xml,image/gif;q=0.9,*/*;q=0.1" },
       redirect: "manual",
@@ -205,16 +226,94 @@ export function createNftMediaResolver({
   mediaTimeoutMs = 7000,
   maxMetadataBytes = 768 * 1024,
   maxMediaBytes = 8 * 1024 * 1024,
+  maxMemoryEntries = 512,
+  cacheDir = "",
 } = {}) {
   const tokenCache = new Map()
+  const collectionCache = new Map()
   const media = new Map()
+  let proxyDnsProbe
+  let cacheDirectoryPromise
+
+  function capCache(cache) {
+    const limit = Math.max(1, Number(maxMemoryEntries) || 512)
+    while (cache.size > limit) cache.delete(cache.keys().next().value)
+  }
+
+  function cachePaths(id) {
+    return {
+      bytes: join(cacheDir, `${id}.bin`),
+      metadata: join(cacheDir, `${id}.json`),
+    }
+  }
+
+  function ensureCacheDirectory() {
+    if (!cacheDir) return null
+    if (!cacheDirectoryPromise) cacheDirectoryPromise = mkdir(cacheDir, { recursive: true, mode: 0o700 })
+    return cacheDirectoryPromise
+  }
+
+  async function readCachedMedia(id) {
+    if (!cacheDir) return null
+    const paths = cachePaths(id)
+    try {
+      const [metadataBytes, bytes] = await Promise.all([readFile(paths.metadata), readFile(paths.bytes)])
+      const metadata = JSON.parse(metadataBytes.toString("utf8"))
+      const digest = createHash("sha256").update(bytes).digest("hex")
+      if (!IMAGE_DATA_TYPES.has(metadata.contentType) || metadata.byteLength !== bytes.length || metadata.sha256 !== digest) {
+        throw new Error("Invalid NFT media cache entry")
+      }
+      return { bytes, contentType: metadata.contentType }
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        await Promise.allSettled([rm(paths.metadata, { force: true }), rm(paths.bytes, { force: true })])
+      }
+      return null
+    }
+  }
+
+  async function writeCachedMedia(id, payload) {
+    if (!cacheDir) return
+    await ensureCacheDirectory()
+    const paths = cachePaths(id)
+    const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const temporaryBytes = `${paths.bytes}.${suffix}.tmp`
+    const temporaryMetadata = `${paths.metadata}.${suffix}.tmp`
+    const metadata = {
+      contentType: payload.contentType,
+      byteLength: payload.bytes.length,
+      sha256: createHash("sha256").update(payload.bytes).digest("hex"),
+    }
+    try {
+      await Promise.all([
+        writeFile(temporaryBytes, payload.bytes, { mode: 0o600 }),
+        writeFile(temporaryMetadata, JSON.stringify(metadata), { mode: 0o600 }),
+      ])
+      await rename(temporaryBytes, paths.bytes)
+      await rename(temporaryMetadata, paths.metadata)
+    } finally {
+      await Promise.allSettled([rm(temporaryBytes, { force: true }), rm(temporaryMetadata, { force: true })])
+    }
+  }
+
+  function proxyDnsActive() {
+    if (!proxyDnsProbe) {
+      proxyDnsProbe = lookupImpl("example.com", { all: true })
+        .then((addresses) => addresses.length > 0 && addresses.every((entry) => isSyntheticProxyIp(entry.address)))
+        .catch(() => false)
+    }
+    return proxyDnsProbe
+  }
 
   function registerMedia(source, tokenId) {
     const sources = nftUriCandidates(source, tokenId)
       .filter((uri) => uri.startsWith("data:") || /^https?:\/\//i.test(uri))
     if (!sources.length) return null
     const id = createHash("sha256").update(sources.join("\n")).digest("hex").slice(0, 32)
-    if (!media.has(id)) media.set(id, { sources, payload: null, promise: null, failedAt: 0, error: null })
+    if (!media.has(id)) {
+      media.set(id, { sources, payload: null, promise: null, failedAt: 0, error: null })
+      capCache(media)
+    }
     return `/api/mint-monitor/media/${id}`
   }
 
@@ -228,22 +327,17 @@ export function createNftMediaResolver({
       return JSON.parse(decoded.bytes.toString("utf8"))
     }
     if (IMAGE_EXTENSIONS.test(candidates[0])) return { image: uri }
-    const errors = []
-    for (const candidate of candidates) {
-      try {
-        const result = await fetchPublicBytes(candidate, {
+    return firstSuccessful(candidates, async (candidate) => {
+      const result = await fetchPublicBytes(candidate, {
           fetchImpl,
           lookupImpl,
+          proxyDnsActive,
           maxBytes: maxMetadataBytes,
           timeoutMs: metadataTimeoutMs,
-        })
-        if (IMAGE_DATA_TYPES.has(result.contentType)) return { image: candidate }
-        return JSON.parse(result.bytes.toString("utf8"))
-      } catch (error) {
-        errors.push(text(error))
-      }
-    }
-    throw new Error(`NFT metadata unavailable: ${unique(errors).join("; ")}`)
+      })
+      if (IMAGE_DATA_TYPES.has(result.contentType)) return { image: candidate }
+      return JSON.parse(result.bytes.toString("utf8"))
+    }, "NFT metadata unavailable")
   }
 
   async function readCollectionMetadata(client, tokenId) {
@@ -256,13 +350,54 @@ export function createNftMediaResolver({
         })
         if (!uri) continue
         const metadata = await metadataFromUri(uri, tokenId)
-        if (metadata) return { metadata, tokenUri: normalizeNftUri(uri, tokenId) }
+        if (metadata) return { metadata, tokenUri: normalizeNftUri(uri, tokenId), source: functionName === "contractURI" ? "contract_uri" : "collection_uri" }
       } catch (error) {
         errors.push(text(error))
       }
     }
     if (errors.length) throw new Error(errors.at(-1))
     return null
+  }
+
+  function metadataFields(metadata, tokenId) {
+    const imageData = typeof metadata?.image_data === "string" && /^\s*<svg[\s>]/i.test(metadata.image_data)
+      ? `data:image/svg+xml,${encodeURIComponent(metadata.image_data)}`
+      : ""
+    const source = metadata?.logo || metadata?.logo_url || metadata?.logoUrl || metadata?.image || metadata?.image_url || metadata?.imageUrl || imageData
+    return {
+      imageUrl: registerMedia(source, tokenId),
+      name: typeof metadata?.name === "string" ? metadata.name.slice(0, 200) : "",
+      website: typeof (metadata?.external_url || metadata?.externalUrl || metadata?.website) === "string"
+        ? String(metadata.external_url || metadata.externalUrl || metadata.website).slice(0, 1000)
+        : "",
+      twitter: typeof (metadata?.twitter || metadata?.twitter_url || metadata?.twitterUrl) === "string"
+        ? String(metadata.twitter || metadata.twitter_url || metadata.twitterUrl).slice(0, 1000)
+        : "",
+      discordUrl: typeof (metadata?.discord || metadata?.discord_url || metadata?.discordUrl) === "string"
+        ? String(metadata.discord || metadata.discord_url || metadata.discordUrl).slice(0, 1000)
+        : "",
+    }
+  }
+
+  async function resolveCollection({ client, chainId, address }) {
+    const key = `${chainId}:${address.toLowerCase()}`
+    if (collectionCache.has(key)) return collectionCache.get(key)
+    const pending = (async () => {
+      const collection = await readCollectionMetadata({
+        readContract: (request) => client.readContract({ address, ...request }),
+      }, "0")
+      if (!collection) return { imageUrl: null, imageSource: null, name: "", website: "", twitter: "", discordUrl: "", metadataUri: "" }
+      const fields = metadataFields(collection.metadata, "0")
+      if (fields.imageUrl) await loadMedia(fields.imageUrl.split("/").at(-1))
+      return {
+        ...fields,
+        imageSource: fields.imageUrl ? collection.source : null,
+        metadataUri: collection.tokenUri,
+      }
+    })().catch((error) => ({ imageUrl: null, imageSource: null, name: "", website: "", twitter: "", discordUrl: "", metadataUri: "", error: text(error) }))
+    collectionCache.set(key, pending)
+    capCache(collectionCache)
+    return pending
   }
 
   async function resolveToken({ client, chainId, address, tokenStandard, tokenId }) {
@@ -273,6 +408,7 @@ export function createNftMediaResolver({
       const is1155 = tokenStandard === "ERC1155"
       let tokenUri = ""
       let metadata = null
+      let imageSource = is1155 ? "token_uri" : "token_uri"
       let tokenError = null
       try {
         tokenUri = await client.readContract({
@@ -292,27 +428,55 @@ export function createNftMediaResolver({
         if (collection) {
           metadata = collection.metadata
           tokenUri = collection.tokenUri
+          imageSource = collection.source
         }
       }
       if (!metadata && tokenError) throw tokenError
-      const imageData = typeof metadata?.image_data === "string" && /^\s*<svg[\s>]/i.test(metadata.image_data)
-        ? `data:image/svg+xml,${encodeURIComponent(metadata.image_data)}`
-        : ""
-      const source = metadata?.image || metadata?.image_url || metadata?.imageUrl || imageData
-      const imageUrl = registerMedia(source, tokenId)
+      const fields = metadataFields(metadata, tokenId)
+      const imageUrl = fields.imageUrl
       if (imageUrl) await loadMedia(imageUrl.split("/").at(-1))
       return {
         imageUrl,
-        tokenName: typeof metadata?.name === "string" ? metadata.name.slice(0, 200) : "",
+        imageSource: imageUrl ? imageSource : null,
+        tokenName: fields.name,
         tokenUri: normalizeNftUri(tokenUri, tokenId),
       }
-    })().catch((error) => ({ imageUrl: null, tokenName: "", tokenUri: "", error: text(error) }))
+    })().catch((error) => ({ imageUrl: null, imageSource: null, tokenName: "", tokenUri: "", error: text(error) }))
       .then((result) => {
         if (!result.imageUrl) tokenCache.delete(key)
         return result
       })
     tokenCache.set(key, pending)
+    capCache(tokenCache)
     return pending
+  }
+
+  async function resolveProject({ marketImageUrl = "", tokenId = "", ...request }) {
+    const collection = await resolveCollection(request)
+    if (collection?.imageUrl) return collection
+
+    if (marketImageUrl) {
+      const imageUrl = registerMedia(marketImageUrl, "0")
+      if (imageUrl) {
+        try {
+          await loadMedia(imageUrl.split("/").at(-1))
+          return { ...collection, imageUrl, imageSource: "opensea" }
+        } catch {
+          // Continue to the token image fallback.
+        }
+      }
+    }
+
+    const token = tokenId === null || tokenId === undefined || tokenId === ""
+      ? null
+      : await resolveToken({ ...request, tokenId })
+    return {
+      ...collection,
+      imageUrl: token?.imageUrl || null,
+      imageSource: token?.imageUrl ? "token_uri" : null,
+      tokenName: token?.tokenName || "",
+      tokenUri: token?.tokenUri || "",
+    }
   }
 
   async function loadMedia(id) {
@@ -322,26 +486,29 @@ export function createNftMediaResolver({
     if (entry.promise) return entry.promise
     if (entry.error && Date.now() - entry.failedAt < 30_000) throw entry.error
     entry.promise = (async () => {
-      const errors = []
-      for (const source of entry.sources) {
-        try {
-          const payload = source.startsWith("data:")
-            ? decodeDataUri(source, maxMediaBytes)
-            : await fetchPublicBytes(source, {
+      const cached = await readCachedMedia(String(id))
+      if (cached) {
+        entry.payload = cached
+        entry.error = null
+        return cached
+      }
+      const payload = await firstSuccessful(entry.sources, async (source) => {
+        const result = source.startsWith("data:")
+          ? decodeDataUri(source, maxMediaBytes)
+          : await fetchPublicBytes(source, {
               fetchImpl,
               lookupImpl,
+              proxyDnsActive,
               maxBytes: maxMediaBytes,
               timeoutMs: mediaTimeoutMs,
-            })
-          if (!IMAGE_DATA_TYPES.has(payload.contentType)) throw new Error(`Unsupported NFT image type: ${payload.contentType}`)
-          entry.payload = { bytes: payload.bytes, contentType: payload.contentType }
-          entry.error = null
-          return entry.payload
-        } catch (error) {
-          errors.push(text(error))
-        }
-      }
-      throw new Error(`NFT image unavailable: ${unique(errors).join("; ")}`)
+          })
+        if (!IMAGE_DATA_TYPES.has(result.contentType)) throw new Error(`Unsupported NFT image type: ${result.contentType}`)
+        return { bytes: result.bytes, contentType: result.contentType }
+      }, "NFT image unavailable")
+      entry.payload = payload
+      entry.error = null
+      await writeCachedMedia(String(id), payload).catch(() => {})
+      return payload
     })().catch((error) => {
       entry.error = error
       entry.failedAt = Date.now()
@@ -350,5 +517,5 @@ export function createNftMediaResolver({
     return entry.promise
   }
 
-  return { loadMedia, normalizeNftUri, registerMedia, resolveToken }
+  return { loadMedia, normalizeNftUri, registerMedia, resolveCollection, resolveProject, resolveToken }
 }
