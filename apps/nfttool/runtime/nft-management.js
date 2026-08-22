@@ -21,8 +21,6 @@ import {
 } from './components.js';
 
 const MARKET_SHORT = { opensea: 'OS', x2y2: 'X2', blur: 'Blur' };
-// Previews and holdings queries move no funds, so a timeout there is a free retry.
-const PREVIEW_TIMEOUT_MS = 60_000;
 
 function clearTokenPrices(form) {
   if (!form.prices) return;
@@ -105,7 +103,6 @@ function bindHoldingChecks(root, form, render) {
 async function queryHoldings(form, state, render, { selectAll = false } = {}) {
   const result = await api('/api/token-holdings/query', {
     method: 'POST',
-    timeoutMs: PREVIEW_TIMEOUT_MS,
     body: JSON.stringify({
       chainId: writeChainId(state),
       walletIds: [...form.walletIds],
@@ -280,7 +277,6 @@ export async function previewListings(form, markets, request = api) {
   const duration = durationSeconds(form);
   const results = await Promise.allSettled(markets.map((market) => request('/api/nft-listings/preview', {
     method: 'POST',
-    timeoutMs: PREVIEW_TIMEOUT_MS,
     body: JSON.stringify({
       snapshotId: form.snapshot.snapshotId,
       holdingIds: [...form.holdingIds],
@@ -422,7 +418,7 @@ export function renderBatchSell({ state, render }) {
       root.querySelector('[name="sort"]')?.addEventListener('change', (event) => { form.sort = event.target.value; render(); });
       root.querySelector('#preview-sell-approval')?.addEventListener('click', () => void runAction(async () => {
         const walletIds = [...new Set(selectedHoldingRows(form).map((row) => row.walletId))];
-        form.approvalPlans = await Promise.all(selectedMarkets.map((market) => api('/api/plan/nft-approval', { method: 'POST', timeoutMs: PREVIEW_TIMEOUT_MS, body: JSON.stringify({ chainId: writeChainId(state), rpcProfileId: writeProfileId(state), rpcProfileRef: writeProfileRef(state), walletIds, snapshotId: form.snapshot.snapshotId, contractAddress: form.contractAddress, marketplace: market.id, approved: true, holdingsOnly: true, preflight: true }) })));
+        form.approvalPlans = await Promise.all(selectedMarkets.map((market) => api('/api/plan/nft-approval', { method: 'POST', body: JSON.stringify({ chainId: writeChainId(state), rpcProfileId: writeProfileId(state), rpcProfileRef: writeProfileRef(state), walletIds, snapshotId: form.snapshot.snapshotId, contractAddress: form.contractAddress, marketplace: market.id, approved: true, holdingsOnly: true, preflight: true }) })));
         return form.approvalPlans;
       }, { success: '链上授权状态已检查' }));
       root.querySelector('#execute-sell-approval')?.addEventListener('click', () => {

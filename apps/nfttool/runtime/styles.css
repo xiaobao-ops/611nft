@@ -851,3 +851,6 @@ h2 { font-size: 14px; line-height: 1.3; font-weight: 600; }
   .live-row-main > .live-row-meta { grid-column: 1 / -1; }
   .live-row-actions { align-items: flex-start; flex-wrap: wrap; }
 }
+.plan-excluded { border: 1px solid var(--line-soft); border-left: 3px solid var(--red-dark); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; font-size: 12px; }
+.plan-excluded ul { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; color: var(--muted); }
+.task-result { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line-soft); }

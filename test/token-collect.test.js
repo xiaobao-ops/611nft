@@ -85,3 +85,34 @@ test("collect plan encodes the complete selected balance for each token standard
     assert.equal(plan.entries[0].data.slice(2, 10), fixture.selector)
   }
 })
+
+test("rows that cannot be collected are reported instead of silently dropped", () => {
+  // Counting selected rows against planned entries is how an operator checks a batch.
+  // Dropping a row without a word is what made a 3-wallet transfer look like a 2.
+  const DEST = "0x00000000000000000000000000000000000000C1"
+  const plan = buildTokenCollectPlan({
+    contractAddress: CONTRACT,
+    destination: DEST,
+    rows: [
+      { id: "a", walletId: "a", address: WALLETS[0].address, tokenId: "1", count: "1", standard: "ERC721" },
+      { id: "b", walletId: "b", address: WALLETS[1].address, tokenId: "2", count: "0", standard: "ERC721" },
+      { id: "c", walletId: "c", address: DEST, tokenId: "3", count: "1", standard: "ERC721" },
+    ],
+  })
+  assert.equal(plan.entries.length, 1)
+  assert.equal(plan.rowCount, 3, "the caller can compare what it selected against what will send")
+  assert.equal(plan.excluded.length, 2)
+  assert.deepEqual(plan.excluded.map((row) => row.walletId), ["b", "c"])
+  assert.match(plan.excluded[0].reason, /数量为 0/)
+  assert.match(plan.excluded[1].reason, /接收地址/)
+})
+
+test("a plan with nothing excluded still reports an empty exclusion list", () => {
+  const plan = buildTokenCollectPlan({
+    contractAddress: CONTRACT,
+    destination: "0x00000000000000000000000000000000000000C1",
+    rows: [{ id: "a", walletId: "a", address: WALLETS[0].address, tokenId: "1", count: "1", standard: "ERC721" }],
+  })
+  assert.deepEqual(plan.excluded, [])
+  assert.equal(plan.rowCount, 1)
+})

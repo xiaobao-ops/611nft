@@ -134,3 +134,23 @@ test("malformed JSON on a successful response still degrades to an empty object"
   })
   assert.deepEqual(await api("/api/chains"), {})
 })
+
+test("planning and holdings POSTs get the read budget, task POSTs keep the write one", async () => {
+  const { isReadOnlyRequest } = await import("../apps/nfttool/runtime/core.js")
+  // These build a preview from chain reads and broadcast nothing, so a short deadline is
+  // free. Under the write budget a slow one held the global busy lock for five minutes.
+  for (const path of ["/api/plan/one-to-many", "/api/plan/token-collect", "/api/plan/nft-approval", "/api/token-holdings/query", "/api/nft-listings/preview"]) {
+    assert.equal(isReadOnlyRequest(path, "POST"), true, path)
+    assert.equal(requestDeadline({ path, method: "POST" }).budget, 60_000, path)
+  }
+  // Anything that actually sends transactions must keep the long budget: aborting a live
+  // broadcast invites a retry that double-sends.
+  for (const path of ["/api/tasks/one-to-many", "/api/tasks/token-collect", "/api/nft-listings/submit", "/api/wallets/export"]) {
+    assert.equal(isReadOnlyRequest(path, "POST"), false, path)
+    assert.equal(requestDeadline({ path, method: "POST" }).budget, 300_000, path)
+  }
+  // A query string must not defeat the match.
+  assert.equal(isReadOnlyRequest("/api/plan/one-to-many?x=1", "POST"), true)
+  // An explicit override still wins.
+  assert.equal(requestDeadline({ path: "/api/tasks/one-to-many", method: "POST", timeoutMs: 5_000 }).budget, 5_000)
+})

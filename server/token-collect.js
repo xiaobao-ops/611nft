@@ -248,10 +248,22 @@ export function buildTokenCollectPlan({ contractAddress, destination, rows }) {
   const receiver = requiredAddress(destination, "接收地址")
   if (!Array.isArray(rows) || !rows.length) throw new Error("请至少选择一条有效持仓")
   const entries = []
+  // Same reasoning as the disperse plan: a row can legitimately drop out, but doing it
+  // silently makes the operator count the selected rows and the planned entries and find
+  // a difference with no explanation.
+  const excluded = []
   for (const row of rows) {
     const source = requiredAddress(row.address, `钱包 ${row.walletId} 地址`)
     const amount = BigInt(row.count || 0)
-    if (amount <= 0n || source.toLowerCase() === receiver.toLowerCase()) continue
+    if (amount <= 0n || source.toLowerCase() === receiver.toLowerCase()) {
+      excluded.push({
+        walletId: row.walletId,
+        address: source,
+        tokenId: row.tokenId ?? null,
+        reason: amount <= 0n ? "持仓数量为 0" : "该钱包就是接收地址，无需自转",
+      })
+      continue
+    }
     let data
     if (row.standard === "ERC20") {
       data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [receiver, amount] })
@@ -275,5 +287,5 @@ export function buildTokenCollectPlan({ contractAddress, destination, rows }) {
     })
   }
   if (!entries.length) throw new Error("所选持仓没有可归集余额")
-  return { contractAddress: token, destination: receiver, entries }
+  return { contractAddress: token, destination: receiver, entries, excluded, rowCount: rows.length }
 }

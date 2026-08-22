@@ -57,7 +57,7 @@ test("marketplace previews run together instead of one platform at a time", asyn
   assert.deepEqual(jobs.map((job) => job.id), ["opensea-job", "x2y2-job", "blur-job"])
   assert.deepEqual(state.calls.map((call) => call.body.marketplace).sort(), ["blur", "opensea", "x2y2"])
   assert.ok(state.calls.every((call) => call.body.durationSeconds === 900), "duration is resolved once for the batch")
-  assert.ok(state.calls.every((call) => call.timeoutMs === 60_000), "previews carry their own short deadline")
+  assert.ok(state.calls.every((call) => call.timeoutMs === undefined), "the deadline comes from the path rule, not per call site")
   assert.deepEqual(state.calls[0].body.holdingIds, ["a:7", "a:8"])
 })
 
@@ -177,4 +177,38 @@ test("readyListingJobs only accepts previews that are actually submittable", () 
   assert.equal(readyListingJobs([{ status: "previewed", summary: { ready: false }, confirmation: {} }]).length, 0)
   assert.equal(readyListingJobs([{ status: "previewed", summary: { ready: true } }]).length, 0, "no credentials, not submittable")
   assert.equal(readyListingJobs([readyJob("opensea")]).length, 1)
+})
+
+const { renderTaskResult } = await import("../apps/nfttool/runtime/core.js")
+
+test("an execution result names every entry's fate, not just the successes", () => {
+  // An 11-wallet disperse that broadcasts 7 must say what became of the other 4; the old
+  // code threw the whole response away and toasted "任务已提交".
+  const html = renderTaskResult({
+    taskId: "task-1",
+    results: [
+      ...Array.from({ length: 7 }, (_, i) => ({ toWalletId: `w${i + 1}`, ok: true, status: "confirmation_pending", txHash: `0x${i}` })),
+      { toWalletId: "w8", ok: false, status: "failed", error: "insufficient funds for gas" },
+      { toWalletId: "w9", ok: false, status: "skipped", error: "前一笔广播结果待确认" },
+      { toWalletId: "w10", ok: false, status: "skipped", error: "前一笔广播结果待确认" },
+      { toWalletId: "w11", ok: false, status: "skipped", error: "前一笔广播结果待确认" },
+    ],
+  })
+  assert.match(html, /11 笔/)
+  assert.match(html, /7 成功/)
+  assert.match(html, /1 失败/)
+  assert.match(html, /3 未执行/)
+  assert.match(html, /insufficient funds for gas/, "the reason travels to the operator verbatim")
+  for (const wallet of ["w1", "w8", "w9", "w11"]) assert.match(html, new RegExp(wallet), `${wallet} must appear`)
+})
+
+test("a fully successful run reads as successful", () => {
+  const html = renderTaskResult({ taskId: "t", results: [{ walletId: "a", ok: true, txHash: "0x1" }] })
+  assert.match(html, /success-text/)
+  assert.doesNotMatch(html, /失败|未执行/)
+})
+
+test("no result means no panel at all", () => {
+  assert.equal(renderTaskResult(null), "")
+  assert.equal(renderTaskResult({ results: [] }), "")
 })

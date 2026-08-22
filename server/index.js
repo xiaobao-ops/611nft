@@ -61,6 +61,7 @@ import { resolveListenHosts } from "./listen-hosts.js"
 import { assertSecureRemoteConfiguration, requireRemoteApiAuth } from "./security.js"
 import { createTaskConfirmationStore } from "./task-confirmations.js"
 import { mapWithLimit } from "./concurrency.js"
+import { ABORT_REASON, abortsRemaining, assignNonces, sendersOf, skippedEntries } from "./execution-policy.js"
 import { createNftHoldingsIndexer } from "./nft-holdings.js"
 import { buildTokenCollectPlan, queryContractHoldings } from "./token-collect.js"
 import {
@@ -1643,25 +1644,17 @@ async function preflightCall({ walletId, chainId, to, valueWei = "0", data = "0x
   })
 }
 
-async function executeEntries({ type, chainId, rpcProfileId = "main", rpcProfileRef = "", entries, mode = "sequential", preflight = true }) {
+async function executeEntries({ type, chainId, rpcProfileId = "main", rpcProfileRef = "", entries, mode = "burst", preflight = true }) {
   const selectedProfile = rpcProfiles.resolve(rpcProfileId || "main", chainId, rpcProfileRef)
   const id = createTask(type, { chainId, rpcProfileId: selectedProfile.id, rpcProfileRef: selectedProfile.profileRef || rpcProfileRef || "", entries, mode, preflight })
   const results = []
-  if (mode === "burst") {
-    const groups = new Map()
-    for (const entry of entries) {
-      const group = groups.get(entry.walletId) || []
-      group.push(entry)
-      groups.set(entry.walletId, group)
-    }
-    for (const [walletId, group] of groups) {
-      const wallet = requireWallet(walletId)
-      const baseNonce = await publicClient(chainId).getTransactionCount({ address: wallet.address, blockTag: "pending" })
-      group.forEach((entry, index) => {
-        if (entry.nonce === undefined || entry.nonce === null || entry.nonce === "") entry.nonce = baseNonce + index
-      })
-    }
-  }
+  // Every mode gets explicit nonces, not just burst. Letting the node choose one per send
+  // races against propagation and rejected every other transaction in a sequential batch.
+  const baseNonces = new Map(await Promise.all(sendersOf(entries).map(async (walletId) => [
+    walletId,
+    await publicClient(chainId).getTransactionCount({ address: requireWallet(walletId).address, blockTag: "pending" }),
+  ])))
+  assignNonces(entries, baseNonces)
   const runEntry = async (entry) => {
     const txRowId = logTx({
       taskId: id,
@@ -1697,7 +1690,8 @@ async function executeEntries({ type, chainId, rpcProfileId = "main", rpcProfile
       })
       results.push({ ...entry, ok: true, status: "confirmation_pending", txHash, sent })
     } catch (error) {
-      if (broadcastUncertain(error)) {
+      const uncertain = broadcastUncertain(error)
+      if (uncertain) {
         const pendingError = uncertainBroadcastError(error)
         updateTx(txRowId, { status: "confirmation_pending", error: pendingError.message, metadata_json: { ...entry, rpcProfileId: selectedProfile.id, rpcProfileRef: selectedProfile.profileRef || rpcProfileRef || "", rpcHost: selectedProfile.host, broadcastStage: "unknown" } })
         results.push({ ...entry, ok: false, status: "confirmation_pending", pending: true, uncertain: true, error: pendingError.message })
@@ -1705,7 +1699,9 @@ async function executeEntries({ type, chainId, rpcProfileId = "main", rpcProfile
         updateTx(txRowId, { status: "failed", error: error.message })
         results.push({ ...entry, ok: false, status: "failed", error: error.message })
       }
-      if (mode === "sequential") throw error
+      // A definite rejection consumed no nonce, so the remaining wallets are still safe to
+      // send; only an uncertain broadcast leaves the nonce in an unknown state.
+      if (abortsRemaining({ mode, uncertain })) throw error
     }
   }
 
@@ -1717,6 +1713,7 @@ async function executeEntries({ type, chainId, rpcProfileId = "main", rpcProfile
     }
     finishTask(id, results.some((result) => result.status === "confirmation_pending") ? "confirmation_pending" : "done", { results })
   } catch (error) {
+    results.push(...skippedEntries(entries, results.length, ABORT_REASON))
     const hasPending = results.some((result) => result.status === "confirmation_pending")
     finishTask(id, hasPending ? (results.some((result) => result.status === "failed") ? "partial" : "confirmation_pending") : (results.some((result) => result.ok) ? "partial" : "failed"), { results }, error.message)
   }
@@ -1794,6 +1791,10 @@ async function buildOneToManyPlan(body) {
   if (asset === "erc20") token = await tokenInfo(chain.id, body.tokenAddress, body)
 
   const entries = []
+  // A target can drop out legitimately (already funded in topup mode, or a zero amount),
+  // but dropping it silently makes a 3-wallet disperse look like it only ever had 2.
+  // Every exclusion is reported with its reason so the operator can see the difference.
+  const excluded = []
   for (const target of targets) {
     let amountWei
     if (mode === "topup") {
@@ -1813,7 +1814,14 @@ async function buildOneToManyPlan(body) {
     } else {
       amountWei = amountToWei(body.amount || "0", token?.decimals || 18)
     }
-    if (amountWei <= 0n) continue
+    if (amountWei <= 0n) {
+      excluded.push({
+        walletId: target.id,
+        address: target.address,
+        reason: mode === "topup" ? "余额已达到目标值，无需补足" : "发送金额为 0",
+      })
+      continue
+    }
     const data = asset === "native"
       ? "0x"
       : encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [target.address, amountWei] })
@@ -1830,7 +1838,7 @@ async function buildOneToManyPlan(body) {
       summary: `${fromId} -> ${target.id} ${weiToDecimal(amountWei, token?.decimals || 18)} ${token?.symbol || chain.nativeSymbol}`,
     })
   }
-  return { chain, asset, token, entries }
+  return { chain, asset, token, entries, excluded, targetCount: targets.length }
 }
 
 async function buildManyToOnePlan(body) {
@@ -1941,7 +1949,7 @@ function buildContractCallPlan(body) {
   return { chain, to, valueWei, entries }
 }
 
-function taskPreview(type, plan, body, mode = body.executionMode || "sequential") {
+function taskPreview(type, plan, body, mode = body.executionMode || "burst") {
   const selectedProfile = rpcProfiles.resolve(body.rpcProfileId || "main", plan.chain.id, body.rpcProfileRef || "")
   const execution = {
     type,
@@ -3070,7 +3078,7 @@ app.post("/api/plan/token-collect", (req, res, next) => {
         rows,
       }),
     }
-    res.json({ ok: true, ...plan, confirmation: taskPreview("token_collect", plan, req.body, "sequential") })
+    res.json({ ok: true, ...plan, confirmation: taskPreview("token_collect", plan, req.body, "burst") })
   } catch (error) {
     error.status = error.status || 400
     next(error)
@@ -3120,7 +3128,7 @@ app.post("/api/plan/nft-approval", async (req, res, next) => {
       rpcProfileId: rpcProfiles.resolve(req.body.rpcProfileId || "main", chain.id, req.body.rpcProfileRef || "").id,
       rpcProfileRef: rpcProfiles.resolve(req.body.rpcProfileId || "main", chain.id, req.body.rpcProfileRef || "").profileRef || req.body.rpcProfileRef || "",
       entries: plan.entries,
-      mode: req.body.executionMode || "sequential",
+      mode: req.body.executionMode || "burst",
       preflight: req.body.preflight !== false,
     }) : null
     res.json({ ok: true, chain: { id: chain.id, name: chain.name, nativeSymbol: chain.nativeSymbol }, ...plan, confirmation })
@@ -3214,7 +3222,7 @@ app.post("/api/tasks/one-to-many", async (req, res, next) => {
 app.post("/api/plan/many-to-one", async (req, res, next) => {
   try {
     const plan = await buildManyToOnePlan(req.body)
-    res.json({ ok: true, ...plan, confirmation: taskPreview("many_to_one", plan, req.body, "sequential") })
+    res.json({ ok: true, ...plan, confirmation: taskPreview("many_to_one", plan, req.body, "burst") })
   } catch (error) {
     next(error)
   }
@@ -3257,7 +3265,7 @@ app.post("/api/plan/approval", async (req, res, next) => {
       rpcProfileId: rpcProfiles.resolve(req.body.rpcProfileId || "main", plan.chain.id, req.body.rpcProfileRef || "").id,
       rpcProfileRef: rpcProfiles.resolve(req.body.rpcProfileId || "main", plan.chain.id, req.body.rpcProfileRef || "").profileRef || req.body.rpcProfileRef || "",
       entries: plan.entries,
-      mode: req.body.executionMode || "sequential",
+      mode: req.body.executionMode || "burst",
       preflight: req.body.preflight !== false,
     })
     res.json({ ok: true, ...plan, confirmation })

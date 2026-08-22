@@ -15,6 +15,9 @@ const LEGACY_RPC_SELECTION_KEY = 'nfttool:rpc-selection';
 // working would invite a retry that double-sends. Call sites where a timeout is
 // harmless (previews, queries) pass a shorter timeoutMs.
 const API_READ_TIMEOUT_MS = 30_000;
+// Read-only POSTs do real chain work (balance reads, enumeration, router calls), so they
+// need more room than a GET but must never sit on the busy lock for the write budget.
+const API_PLAN_TIMEOUT_MS = 60_000;
 const API_WRITE_TIMEOUT_MS = 300_000;
 const PROFILE_LABELS = [
   ['ethereum', 'Ethereum'],
@@ -160,10 +163,23 @@ export function persistSelection(state = runtimeState) {
   state.selected = new Set(writeStoredWalletIds(ids));
 }
 
-export function requestDeadline({ method = 'GET', timeoutMs, signal } = {}) {
+// Planning and holdings endpoints are POSTs but broadcast nothing: they read the chain
+// and hand back a preview. Giving them the write budget meant a slow one held the global
+// busy lock for five minutes, during which every other click silently did nothing.
+// The server's own naming makes this unambiguous — /api/plan/* plans, /api/tasks/* sends.
+const READ_ONLY_POST_PATHS = ['/api/token-holdings/query', '/api/nft-listings/preview'];
+
+export function isReadOnlyRequest(path, method) {
+  if (String(method || 'GET').toUpperCase() === 'GET') return true;
+  const route = String(path || '').split('?')[0];
+  return route.startsWith('/api/plan/') || READ_ONLY_POST_PATHS.includes(route);
+}
+
+export function requestDeadline({ path = '', method = 'GET', timeoutMs, signal } = {}) {
   const budget = Number.isFinite(timeoutMs) && timeoutMs > 0
     ? timeoutMs
-    : String(method).toUpperCase() === 'GET' ? API_READ_TIMEOUT_MS : API_WRITE_TIMEOUT_MS;
+    : String(method || 'GET').toUpperCase() === 'GET' ? API_READ_TIMEOUT_MS
+      : isReadOnlyRequest(path, method) ? API_PLAN_TIMEOUT_MS : API_WRITE_TIMEOUT_MS;
   const deadline = AbortSignal.timeout(budget);
   return { budget, deadline, signal: signal ? AbortSignal.any([signal, deadline]) : deadline };
 }
@@ -179,7 +195,7 @@ function requestFailure(error, path, deadline, budget) {
 
 export async function api(path, options = {}) {
   const { timeoutMs, signal: callerSignal, ...init } = options;
-  const { budget, deadline, signal } = requestDeadline({ method: init.method, timeoutMs, signal: callerSignal });
+  const { budget, deadline, signal } = requestDeadline({ path, method: init.method, timeoutMs, signal: callerSignal });
   let response;
   try {
     response = await fetch(path, {
@@ -333,10 +349,66 @@ export function walletBalance(wallet, chainId, tokenKey = 'native') {
   return wallet.balances?.find((row) => Number(row.chainId) === Number(chainId) && row.tokenKey === tokenKey) || null;
 }
 
+// A target can drop out of a plan for good reasons (already funded, zero amount, self
+// transfer), but the count is what the operator checks against their selection. Showing
+// only the survivors turned a 3-wallet disperse into a silent 2.
+function excludedPanel(plan, entries) {
+  const excluded = Array.isArray(plan.excluded) ? plan.excluded : [];
+  if (!excluded.length) return '';
+  const selected = Number(plan.targetCount ?? plan.rowCount ?? (entries.length + excluded.length));
+  return `
+    <div class="plan-excluded">
+      <strong class="danger-text">已选 ${escapeHtml(selected)} 个，其中 ${escapeHtml(excluded.length)} 个不会发送</strong>
+      <ul>${excluded.map((item) => `<li><span class="mono">${escapeHtml(item.walletId || shortAddress(item.address))}</span>${item.tokenId === null || item.tokenId === undefined ? '' : ` <span class="mono">#${escapeHtml(item.tokenId)}</span>`} — ${escapeHtml(item.reason || '已排除')}</li>`).join('')}</ul>
+    </div>
+  `;
+}
+
+const RESULT_LABELS = {
+  confirmation_pending: ['待确认', 'warning'],
+  failed: ['失败', 'danger'],
+  skipped: ['已跳过', 'danger'],
+};
+
+// The server reports the fate of every entry, but the UI used to throw the whole response
+// away and just say "任务已提交". That is why an 11-wallet disperse could execute 7 with
+// no indication of what happened to the other 4.
+export function renderTaskResult(result) {
+  if (!result) return '';
+  const rows = Array.isArray(result.results) ? result.results : [];
+  if (!rows.length) return '';
+  const sent = rows.filter((row) => row.ok).length;
+  const pending = rows.filter((row) => row.status === 'confirmation_pending').length;
+  const skipped = rows.filter((row) => row.status === 'skipped').length;
+  const failed = rows.filter((row) => row.status === 'failed').length;
+  const parts = [`${rows.length} 笔`, `${sent} 成功`];
+  if (pending) parts.push(`${pending} 待确认`);
+  if (failed) parts.push(`${failed} 失败`);
+  if (skipped) parts.push(`${skipped} 未执行`);
+  return `
+    <div class="task-result">
+      <div class="plan-summary">
+        <div><span>执行结果</span><strong class="${sent === rows.length ? 'success-text' : 'danger-text'}">${escapeHtml(parts.join(' · '))}</strong></div>
+        <div><span>任务号</span><strong class="mono">${escapeHtml(result.taskId || '-')}</strong></div>
+      </div>
+      <div class="table-scroll compact-table">
+        <table>
+          <thead><tr><th>#</th><th>钱包</th><th>状态</th><th>说明</th></tr></thead>
+          <tbody>${rows.map((row, index) => {
+            const [label, tone] = RESULT_LABELS[row.status] || (row.ok ? ['已广播', 'success'] : ['-', '']);
+            return `<tr><td>${index + 1}</td><td>${escapeHtml(row.toWalletId || row.walletId || '-')}</td><td class="${tone}-text">${escapeHtml(label)}</td><td class="mono">${escapeHtml(row.error || row.txHash || row.summary || '')}</td></tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
 export function renderPlan(plan, emptyText = '尚未生成预览') {
   if (!plan) return `<div class="empty-state">${escapeHtml(emptyText)}</div>`;
   const entries = Array.isArray(plan.entries) ? plan.entries : [];
   return `
+    ${excludedPanel(plan, entries)}
     <div class="plan-summary">
       <div><span>交易数</span><strong>${entries.length}</strong></div>
       <div><span>执行模式</span><strong>${escapeHtml(plan.confirmation?.mode || '顺序')}</strong></div>
@@ -378,7 +450,13 @@ export function toast(message, type = 'success') {
 }
 
 export async function runAction(action, { success = '', refresh = false, rerender = true } = {}) {
-  if (runtimeState.busy) return null;
+  // busy is a global lock, so a slow query elsewhere on the page can swallow a click the
+  // operator already confirmed. Returning null without a word is what made "执行任务"
+  // pop its confirmation and then do nothing at all.
+  if (runtimeState.busy) {
+    toast('上一个操作还在进行中，请等它结束后再试', 'error');
+    return null;
+  }
   setBusy(true);
   try {
     const result = await action();

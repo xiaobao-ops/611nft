@@ -5,6 +5,7 @@ import {
   nativeToWei,
   networkBar,
   renderPlan,
+  renderTaskResult,
   runAction,
   selectedIds,
   shortAddress,
@@ -22,6 +23,7 @@ import {
   walletGroupFilterBar,
 } from './components.js';
 import { normalizeWalletGroup, UNGROUPED_LABEL } from './wallet-groups.js';
+
 
 function pickerWallets(state, { exclude = new Set(), groupKey = null } = {}) {
   const excluded = new Set([...exclude].map(String));
@@ -179,16 +181,29 @@ function bindTextFields(root, form, clearPlan, names) {
   }
 }
 
-async function executePlan(taskPath, plan, label) {
+// Takes the form rather than the plan so the per-entry outcome can be kept and rendered:
+// the server already reports every entry's fate, and discarding it left the operator to
+// reconstruct a partial batch from a block explorer.
+async function executePlan(taskPath, form, label) {
+  const plan = form.plan;
   if (!plan) {
     toast('请先生成预览', 'error');
     return null;
   }
-  if (!window.confirm(`${label}？本次共 ${plan.entries?.length || 0} 笔交易。`)) return null;
-  return runAction(() => api(taskPath, {
+  const count = plan.entries?.length || 0;
+  if (!window.confirm(`${label}？本次共 ${count} 笔交易。\n全部交易将并发广播，力争同一区块内完成。`)) return null;
+  form.result = null;
+  const result = await runAction(() => api(taskPath, {
     method: 'POST',
     body: JSON.stringify(confirmationBody(plan)),
-  }), { success: '任务已提交' });
+  }), { success: '' });
+  if (result) {
+    form.result = result;
+    const rows = Array.isArray(result.results) ? result.results : [];
+    const sent = rows.filter((row) => row.ok).length;
+    toast(sent === rows.length ? `${sent} 笔已全部广播` : `${rows.length} 笔中 ${sent} 笔广播成功，详情见执行结果`, sent === rows.length ? 'success' : 'error');
+  }
+  return result;
 }
 
 export function renderDisperse({ state, render }) {
@@ -202,7 +217,7 @@ export function renderDisperse({ state, render }) {
     amountMode: 'fixed',
     amount: '0.001',
     targetBalance: '0.001',
-    executionMode: 'sequential',
+    executionMode: 'burst',
     preflight: true,
     plan: null,
   };
@@ -227,7 +242,7 @@ export function renderDisperse({ state, render }) {
         <section class="data-panel"><header><h2>分发账号</h2><span>单选</span></header>${walletPicker(state, { selected: form.fromId, name: 'fromWallet', radio: true, exclude: new Set(form.targetIds), groupPrefix: 'disperse-from', groupKey: form.fromGroup })}</section>
         <section class="data-panel"><header><h2>Recipients Wallet</h2><span>${selectedTargetIds.length} 个</span></header>${walletPicker(state, { selected: form.targetIds, name: 'targetWallet', exclude: new Set([form.fromId]), groupPrefix: 'disperse-target' })}</section>
       </div>
-      <section class="preview-panel"><header><h2>交易预览</h2></header>${renderPlan(form.plan)}</section>
+      <section class="preview-panel"><header><h2>交易预览</h2></header>${renderPlan(form.plan)}${renderTaskResult(form.result)}</section>
     `,
     bind(root) {
       root.querySelectorAll('input[name="asset"]').forEach((input) => input.addEventListener('change', () => {
@@ -274,7 +289,7 @@ export function renderDisperse({ state, render }) {
         });
         return form.plan;
       }, { success: '预览已生成' }));
-      root.querySelector('#execute-disperse')?.addEventListener('click', () => void executePlan('/api/tasks/one-to-many', form.plan, '执行分发任务'));
+      root.querySelector('#execute-disperse')?.addEventListener('click', () => void executePlan('/api/tasks/one-to-many', form, '执行分发任务'));
     },
   };
 }
@@ -329,7 +344,7 @@ export function renderCollection({ state, render }) {
           `}
         </section>
       </div>
-      <section class="preview-panel"><header><h2>交易预览</h2></header>${renderPlan(form.plan)}</section>
+      <section class="preview-panel"><header><h2>交易预览</h2></header>${renderPlan(form.plan)}${renderTaskResult(form.result)}</section>
     `,
     bind(root) {
       root.querySelectorAll('[data-mode]').forEach((button) => button.addEventListener('click', () => {
@@ -381,7 +396,7 @@ export function renderCollection({ state, render }) {
         });
         return form.plan;
       }, { success: '预览已生成' }));
-      root.querySelector('#execute-collection')?.addEventListener('click', () => void executePlan(form.mode === 'token' ? '/api/tasks/token-collect' : '/api/tasks/many-to-one', form.plan, '执行归集任务'));
+      root.querySelector('#execute-collection')?.addEventListener('click', () => void executePlan(form.mode === 'token' ? '/api/tasks/token-collect' : '/api/tasks/many-to-one', form, '执行归集任务'));
     },
   };
 }
@@ -395,7 +410,7 @@ export function renderManyToMany({ state, render }) {
     tokenAddress: '',
     amount: '0.001',
     preflight: true,
-    executionMode: 'sequential',
+    executionMode: 'burst',
     plan: null,
   };
   const clearPlan = () => { form.plan = null; };
@@ -409,7 +424,7 @@ export function renderManyToMany({ state, render }) {
       ${networkBar({ state, asset: form.asset, tokenAddress: form.tokenAddress, mode: 'writeProfile' })}
       <div class="toolbar">
         <label class="compact-field"><span>每笔金额</span><input name="amount" value="${escapeHtml(form.amount)}" inputmode="decimal"></label>
-        <label class="compact-field"><span>执行模式</span><select name="executionMode"><option value="sequential" ${form.executionMode === 'sequential' ? 'selected' : ''}>顺序</option><option value="burst" ${form.executionMode === 'burst' ? 'selected' : ''}>并发</option></select></label>
+        
         <label class="toggle"><input name="preflight" type="checkbox" ${form.preflight ? 'checked' : ''}><span>交易前检查</span></label>
         <div class="pair-count ${senders.length === receivers.length && senders.length ? 'valid' : ''}">${senders.length} : ${receivers.length}</div>
         <div class="toolbar-spacer"></div>
@@ -421,12 +436,11 @@ export function renderManyToMany({ state, render }) {
         <section class="data-panel"><header><h2>Recipients Wallet</h2><span>${receivers.length} 个</span></header>${walletPicker(state, { selected: form.receiverIds, name: 'receiverWallet', exclude: form.senderIds, groupPrefix: 'many-receiver' })}</section>
       </div>
       <section class="pair-preview"><header><h2>转账对应关系</h2></header><div class="pair-list">${senders.map((sender, index) => `<div><span>${index + 1}</span><code>${escapeHtml(sender.label || sender.id)}</code><b>→</b><code>${escapeHtml(receivers[index]?.label || '待选择')}</code></div>`).join('') || '<div class="empty-state">请选择发送和接收钱包</div>'}</div></section>
-      <section class="preview-panel"><header><h2>交易预览</h2></header>${renderPlan(form.plan)}</section>
+      <section class="preview-panel"><header><h2>交易预览</h2></header>${renderPlan(form.plan)}${renderTaskResult(form.result)}</section>
     `,
     bind(root) {
       root.querySelectorAll('input[name="asset"]').forEach((input) => input.addEventListener('change', () => { form.asset = input.value; clearPlan(); render(); }));
       bindTextFields(root, form, clearPlan, ['tokenAddress', 'amount']);
-      root.querySelector('[name="executionMode"]')?.addEventListener('change', (event) => { form.executionMode = event.target.value; clearPlan(); });
       root.querySelector('[name="preflight"]')?.addEventListener('change', (event) => { form.preflight = event.target.checked; clearPlan(); });
       bindPicker(root, {
         state,
@@ -451,7 +465,7 @@ export function renderManyToMany({ state, render }) {
         });
         return form.plan;
       }, { success: '预览已生成' }));
-      root.querySelector('#execute-many')?.addEventListener('click', () => void executePlan('/api/tasks/many-to-many', form.plan, '执行多对多转账'));
+      root.querySelector('#execute-many')?.addEventListener('click', () => void executePlan('/api/tasks/many-to-many', form, '执行多对多转账'));
     },
   };
 }
@@ -537,7 +551,7 @@ export function renderExchangeDeposit({ state, render }) {
               valueWei,
               data: '0x',
               preflight: form.preflight,
-              executionMode: 'sequential',
+              executionMode: 'burst',
               rpcProfileId: writeProfileId(state),
               rpcProfileRef: writeProfileRef(state),
             }),
