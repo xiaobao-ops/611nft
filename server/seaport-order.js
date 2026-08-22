@@ -11,8 +11,21 @@ export const ZERO_BYTES32 = `0x${"00".repeat(32)}`
 export const OPENSEA_CONDUIT_KEY = "0x0000007b02230091a7ed01230072f7006a004d60a8d4e71d599b8104250f0000"
 
 const ITEM_TYPE = { NATIVE: 0, ERC20: 1, ERC721: 2, ERC1155: 3 }
-const ORDER_TYPE_FULL_OPEN = 0
+// The "restricted" order types hand fulfilment authority to the zone, which is what
+// OpenSea's Signed Zone V2 collections require; the "partial" ones let a buyer take less
+// than the whole quantity, which only means anything for ERC1155.
+export const ORDER_TYPE = { FULL_OPEN: 0, PARTIAL_OPEN: 1, FULL_RESTRICTED: 2, PARTIAL_RESTRICTED: 3 }
 const BPS = 10_000n
+
+// A zone only has authority over a restricted order, so the two are chosen together.
+// Naming a zone on a FULL_OPEN order leaves it inert and OpenSea rejects the listing:
+// "invalid order type when using a contract that requires Signed Zone V2".
+export function orderTypeFor({ zone, standard, amount = 1n }) {
+  const restricted = Boolean(zone) && zone !== ZERO_ADDRESS
+  const partial = standard === "ERC1155" && BigInt(amount) > 1n
+  if (restricted) return partial ? ORDER_TYPE.PARTIAL_RESTRICTED : ORDER_TYPE.FULL_RESTRICTED
+  return partial ? ORDER_TYPE.PARTIAL_OPEN : ORDER_TYPE.FULL_OPEN
+}
 
 export const SEAPORT_TYPES = {
   OrderComponents: [
@@ -147,7 +160,7 @@ export function buildListingOrder({
       endAmount: quantity.toString(),
     }],
     consideration,
-    orderType: ORDER_TYPE_FULL_OPEN,
+    orderType: orderTypeFor({ zone, standard, amount: quantity }),
     startTime: start.toString(),
     endTime: end.toString(),
     zoneHash: ZERO_BYTES32,

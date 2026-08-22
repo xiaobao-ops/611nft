@@ -7,6 +7,8 @@ import {
   listingPostBody,
   listingTypedData,
   OPENSEA_CONDUIT_KEY,
+  ORDER_TYPE,
+  orderTypeFor,
   SEAPORT_1_6,
   splitListingPrice,
   ZERO_ADDRESS,
@@ -151,9 +153,9 @@ test("an end time that is not after the start is refused", () => {
   assert.throws(() => order({ startTime: 1_700_000_000, endTime: 1_700_000_000 }), /结束时间必须晚于/)
 })
 
-test("Robinhood uses conduitKey zero; other chains pass OpenSea's key through", () => {
-  // OpenSea's conduit has no code on Robinhood, so zero is the only workable value there
-  // and Seaport itself is what the seller approves.
+test("conduitKey defaults to zero and is otherwise passed through verbatim", () => {
+  // The real per-chain key is chosen by the caller (nft-management resolves it from the
+  // marketplace config); this module must not invent one.
   assert.equal(order().conduitKey, ZERO_BYTES32)
   assert.equal(order({ conduitKey: OPENSEA_CONDUIT_KEY }).conduitKey, OPENSEA_CONDUIT_KEY)
 })
@@ -192,4 +194,41 @@ test("the post body is what the OpenSea listings endpoint expects", () => {
   assert.equal(body.protocol_address, SEAPORT_1_6)
   assert.equal(body.parameters.totalOriginalConsiderationItems, 3)
   assert.equal(body.signature, `0x${"ab".repeat(65)}`)
+})
+
+test("a Signed Zone V2 collection gets a restricted order type and the zone it named", () => {
+  // OpenSea refused a FULL_OPEN order: "invalid order type when using a contract that
+  // requires Signed Zone V2 ... use the required zone 0x000056f7…". The collection API
+  // reports that address as required_zone, so the two travel together.
+  const ZONE = "0x000056f7000000ece9003ca63978907a00ffd100"
+  const restricted = order({ zone: ZONE })
+  assert.equal(restricted.zone, ZONE)
+  assert.equal(restricted.orderType, ORDER_TYPE.FULL_RESTRICTED)
+  // zoneHash stays zero: the zone's signature arrives as extraData at fulfilment and is
+  // not part of what the seller signs.
+  assert.equal(restricted.zoneHash, ZERO_BYTES32)
+
+  const open = order()
+  assert.equal(open.zone, ZERO_ADDRESS)
+  assert.equal(open.orderType, ORDER_TYPE.FULL_OPEN)
+})
+
+test("order type pairs zone authority with partial fillability", () => {
+  const ZONE = "0x000056f7000000ece9003ca63978907a00ffd100"
+  assert.equal(orderTypeFor({ zone: ZERO_ADDRESS, standard: "ERC721", amount: 1n }), ORDER_TYPE.FULL_OPEN)
+  assert.equal(orderTypeFor({ zone: ZONE, standard: "ERC721", amount: 1n }), ORDER_TYPE.FULL_RESTRICTED)
+  // Only ERC1155 with more than one unit is meaningfully partially fillable.
+  assert.equal(orderTypeFor({ zone: ZERO_ADDRESS, standard: "ERC1155", amount: 5n }), ORDER_TYPE.PARTIAL_OPEN)
+  assert.equal(orderTypeFor({ zone: ZONE, standard: "ERC1155", amount: 5n }), ORDER_TYPE.PARTIAL_RESTRICTED)
+  assert.equal(orderTypeFor({ zone: ZONE, standard: "ERC1155", amount: 1n }), ORDER_TYPE.FULL_RESTRICTED)
+  assert.equal(orderTypeFor({ zone: "", standard: "ERC721", amount: 1n }), ORDER_TYPE.FULL_OPEN)
+})
+
+test("the zone is part of the signed struct, so it cannot be swapped after signing", () => {
+  const ZONE = "0x000056f7000000ece9003ca63978907a00ffd100"
+  const typed = listingTypedData({ chainId: 4663, order: order({ zone: ZONE }) })
+  assert.equal(typed.message.zone, ZONE)
+  assert.equal(typed.message.orderType, ORDER_TYPE.FULL_RESTRICTED)
+  assert.ok(typed.types.OrderComponents.some((field) => field.name === "zone"))
+  assert.ok(typed.types.OrderComponents.some((field) => field.name === "orderType"))
 })

@@ -20,7 +20,7 @@ function response(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body }
 }
 
-// Robinhood: Seaport is the operator, so orders must use conduitKey zero.
+// Robinhood uses its own OpenSea conduit; the operator and key come from the marketplace config.
 function chainClient({ approved = true, counter = 7n } = {}) {
   return {
     async readContract({ functionName }) {
@@ -211,4 +211,45 @@ test("a rejected order surfaces OpenSea's own message", async () => {
 test("without an API key the preview says so instead of posting anywhere", async () => {
   const listing = service({ fetchImpl: openseaFetch({ fees: REQUIRED_FEES }), env: {} })
   await assert.rejects(() => listing.preview(previewArgs()), /OPENSEA_API_KEY/)
+})
+
+test("a Signed Zone V2 collection is detected from required_zone and honoured", async () => {
+  const ZONE = "0x000056f7000000ece9003ca63978907a00ffd100"
+  const posted = []
+  const listing = service({
+    fetchImpl: async (url, options = {}) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.includes("/contract/")) return response({ collection: "rh" })
+      if (parsed.pathname.startsWith("/api/v2/collections/")) return response({ fees: REQUIRED_FEES, required_zone: ZONE })
+      posted.push(JSON.parse(options.body))
+      return response({ order: { order_hash: "0xh" } })
+    },
+  })
+  const preview = await listing.preview(previewArgs({ rows: [ROWS[0]], prices: { "a:155": "1" } }))
+  await listing.submit({
+    previewId: preview.confirmation.previewId,
+    confirmationToken: preview.confirmation.confirmationToken,
+  })
+  assert.equal(posted[0].parameters.zone, ZONE)
+  assert.equal(posted[0].parameters.orderType, 2, "FULL_RESTRICTED, or OpenSea refuses it")
+})
+
+test("a collection with no required_zone stays a fully open order", async () => {
+  const posted = []
+  const listing = service({
+    fetchImpl: async (url, options = {}) => {
+      const parsed = new URL(url)
+      if (parsed.pathname.includes("/contract/")) return response({ collection: "rh" })
+      if (parsed.pathname.startsWith("/api/v2/collections/")) return response({ fees: REQUIRED_FEES, required_zone: null })
+      posted.push(JSON.parse(options.body))
+      return response({ order: { order_hash: "0xh" } })
+    },
+  })
+  const preview = await listing.preview(previewArgs({ rows: [ROWS[0]], prices: { "a:155": "1" } }))
+  await listing.submit({
+    previewId: preview.confirmation.previewId,
+    confirmationToken: preview.confirmation.confirmationToken,
+  })
+  assert.equal(posted[0].parameters.zone, "0x0000000000000000000000000000000000000000")
+  assert.equal(posted[0].parameters.orderType, 0)
 })

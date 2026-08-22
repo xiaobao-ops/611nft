@@ -8,6 +8,7 @@ import {
   OPENSEA_CONDUIT_KEY,
   SEAPORT_1_6,
   splitListingPrice,
+  ZERO_ADDRESS,
   ZERO_BYTES32,
 } from "./seaport-order.js"
 
@@ -515,7 +516,15 @@ export function createNftListingService({
       const slug = String(contractInfo.collection || "").trim()
       if (!slug) throw new Error("OpenSea 未收录该合约，无法挂单")
       const collection = await openseaJson(`/api/v2/collections/${encodeURIComponent(slug)}`, "OpenSea 合集查询失败")
-      return { slug, fees: collection.fees || [] }
+      // Signed Zone V2 collections name the zone that must authorise fulfilment. Reading
+      // it beats guessing: with no zone the order stays FULL_OPEN, with one it has to be
+      // restricted or OpenSea refuses the listing.
+      const requiredZone = String(collection.required_zone || "").trim()
+      return {
+        slug,
+        fees: collection.fees || [],
+        requiredZone: requiredZone && requiredZone !== ZERO_ADDRESS ? requiredZone : "",
+      }
     })().catch((error) => {
       slugCache.delete(key)
       throw error
@@ -527,7 +536,7 @@ export function createNftListingService({
   async function previewOpenSea({ chain, contract, standard, market, grouped, duration, normalizedRows }) {
     const client = clientForChain?.(chain)
     if (!client) throw new Error("挂单预览需要链上 RPC 客户端")
-    const { slug, fees } = await collectionOf(chain, contract)
+    const { slug, fees, requiredZone } = await collectionOf(chain, contract)
     const includeOptionalFees = String(env.NFT_LISTING_PAY_OPTIONAL_ROYALTY || "").trim() === "true"
     // Configured per chain rather than inferred: OpenSea rejects any key but the one it
     // runs on that chain, and the approval target is whatever that key resolves to.
@@ -560,6 +569,7 @@ export function createNftListingService({
             salt: BigInt(`0x${randomBytes(24).toString("hex")}`),
             counter,
             conduitKey,
+            zone: requiredZone || ZERO_ADDRESS,
             includeOptionalFees,
           }),
           proceeds: {
@@ -579,6 +589,7 @@ export function createNftListingService({
       collectionSlug: slug,
       fees,
       conduitKey,
+      zone: requiredZone || ZERO_ADDRESS,
       groups,
       summary: {
         transactionCount: unapproved.length,
