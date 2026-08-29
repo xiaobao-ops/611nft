@@ -19,10 +19,10 @@ test("CLI parses repeatable local wallet profiles and safe mint options", () => 
   assert.deepEqual(args.walletIds, ["default", "bt-001", "bt-002"])
 })
 
-test("CLI help documents preview-first and local AWP key isolation", () => {
+test("CLI help documents preview-first and server-side key isolation", () => {
   const usage = cliUsage()
   assert.match(usage, /Preview only \(default\)/)
-  assert.match(usage, /Private keys remain inside local AWP profiles/)
+  assert.match(usage, /Private keys remain in the server-side root \.env/)
 })
 
 test("CLI help performs no network or broadcast action", async () => {
@@ -33,5 +33,5 @@ test("CLI help performs no network or broadcast action", async () => {
 })
 
 test("CLI rejects a send run without an explicit wallet selection", async () => {
-  await assert.rejects(() => runCli([contractAddress, "--send", "--yes"]), /Select at least one local AWP wallet/)
+  await assert.rejects(() => runCli([contractAddress, "--send", "--yes"]), /Select at least one local wallet/)
 })
