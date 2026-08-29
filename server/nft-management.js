@@ -985,7 +985,7 @@ export function createNftListingService({
     const results = []
     for (const group of job.groups) {
       const account = accountForWallet(group.walletId)
-      if (!account) throw new Error(`钱包 ${group.walletId} 的本地签名器不可用`)
+      if (!account || account.capabilities?.signTypedData === false) throw new Error(`钱包 ${group.walletId} 的提供方不支持 EIP-712 挂单签名`)
       for (const entry of group.orders) {
         const signature = await account.signTypedData(listingTypedData({ chainId: job.chainId, order: entry.order }))
         const payload = await openseaJson(`/api/v2/orders/${openseaChain(job.chainId)}/seaport/listings`, `${job.marketplace.label} 订单提交`, {
@@ -1026,7 +1026,8 @@ export function createNftListingService({
     const normalizedRows = listingRows({ rows: rows.map((row) => ({ ...row, contractAddress: contract })), prices, amounts, marketplaceId: market.id, standard, currency })
     const grouped = new Map()
     for (const row of normalizedRows) {
-      if (!accountForWallet(row.walletId)) throw new Error(`钱包 ${row.walletId} 不支持本地 EIP-712 挂单签名`)
+      const account = accountForWallet(row.walletId)
+      if (!account || account.capabilities?.signTypedData === false) throw new Error(`钱包 ${row.walletId} 的提供方不支持 EIP-712 挂单签名`)
       const values = grouped.get(row.walletId) || []
       values.push(row)
       grouped.set(row.walletId, values)
@@ -1118,7 +1119,7 @@ export function createNftListingService({
   async function submitRouter(job, results) {
     for (const group of job.groups) {
       const account = accountForWallet(group.walletId)
-      if (!account) throw new Error(`钱包 ${group.walletId} 的本地签名器不可用`)
+      if (!account || account.capabilities?.signTypedData === false) throw new Error(`钱包 ${group.walletId} 的提供方不支持 EIP-712 挂单签名`)
       for (const item of executionItems(group.execution)) {
         if (item.status === "complete" || !item.data?.sign) continue
         const signature = await account.signTypedData(typedData(item.data.sign))

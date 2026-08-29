@@ -5,14 +5,14 @@
 ## 开发环境
 
 ```bash
-git clone https://github.com/Zerorisklabs-V1/611nft.git
+git clone https://github.com/xiaobao-ops/611nft.git
 cd 611nft
 npm ci
 cp .env.example .env
 npm test
 ```
 
-Node.js 需要 22 或更高版本。钱包写操作的本地验证使用根 `.env` 中的专用低余额测试钱包；严禁提交或粘贴真实私钥。
+Node.js 需要 22 或更高版本。钱包写操作通过外部 `awp-wallet` profile 验证；项目 `.env` 只保存服务与 RPC 配置，严禁放入或粘贴钱包密钥材料。
 
 ## Git worktree 协作
 
@@ -52,6 +52,6 @@ git worktree prune
 - 不包含 `.env`、私钥、助记词或钱包导出文件。
 - 不包含 Cookies、会话、认证 Header、带密钥的 RPC URL。
 - 不包含浏览器 HAR、日志、PCAP 或真实交易签名材料。
-- 测试使用确定性的无资金测试私钥或临时钱包，且不要复用真实钱包。
+- 链上和 OpenSea 回归使用可溯源真实响应快照；本地签名验证只使用隔离、无资金的 AWP profile，且不要复用真实资产钱包。
 
 发现安全问题时不要创建公开 Issue，请按 [`SECURITY.md`](SECURITY.md) 操作。

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { once } from "node:events"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -11,6 +11,8 @@ import { encodeAbiParameters, parseAbiParameters, toFunctionSelector } from "vie
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const CONTRACT = "0x00000000000000000000000000000000000000A1"
+const HOLDER_ID = "holder-001"
+const HOLDER_ADDRESS = "0x52908400098527886E0F7030069857D2E4169EE7"
 const TOKEN_COUNT = 24
 const METADATA_BUDGET_MS = 2000
 
@@ -115,6 +117,11 @@ describe("NFT holdings stay bounded when metadata stalls", { timeout: 120_000 },
     const rpcUrl = `http://127.0.0.1:${fixturePort}`
     const idlePort = await unusedPort()
     appBase = `http://127.0.0.1:${idlePort}`
+    const walletRoot = join(tempRoot, "wallets")
+    await mkdir(walletRoot, { recursive: true })
+    await writeFile(join(walletRoot, "wallets.json"), JSON.stringify({
+      [HOLDER_ID]: { address: HOLDER_ADDRESS, source: "awp" },
+    }))
 
     child = spawn(process.execPath, ["--experimental-sqlite", join(ROOT, "server/index.js")], {
       cwd: ROOT,
@@ -125,8 +132,7 @@ describe("NFT holdings stay bounded when metadata stalls", { timeout: 120_000 },
         WALLET_BOARD_API_HOSTS: "",
         WALLET_BOARD_API_TOKEN: "",
         WALLET_BOARD_DB_PATH: join(tempRoot, "test.sqlite"),
-        WALLET_BOARD_WALLET_ROOT: join(tempRoot, "wallets"),
-        WALLET_KEYS_FILE: join(tempRoot, "wallet-keys.env"),
+        WALLET_BOARD_WALLET_ROOT: walletRoot,
         NFT_MEDIA_CACHE_DIR: join(tempRoot, "media"),
         NFT_HOLDING_METADATA_BUDGET_MS: String(METADATA_BUDGET_MS),
         ETH_RPC_URL: rpcUrl,
@@ -160,20 +166,11 @@ describe("NFT holdings stay bounded when metadata stalls", { timeout: 120_000 },
   })
 
   test("holdings return within the metadata budget and report what degraded", async () => {
-    const created = await fetch(`${appBase}/api/wallets/create`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ count: 1, prefix: "holder", start: 1 }),
-    }).then((response) => response.json())
-    assert.equal(created.ok, true, JSON.stringify(created))
-    const walletId = (created.created?.[0]?.id) || created.created?.[0]
-    assert.ok(walletId, `wallet id missing: ${JSON.stringify(created)}`)
-
     const started = Date.now()
     const payload = await fetch(`${appBase}/api/token-holdings/query`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chainId: 1, walletIds: [walletId], contractAddress: CONTRACT, includeMetadata: true }),
+      body: JSON.stringify({ chainId: 1, walletIds: [HOLDER_ID], contractAddress: CONTRACT, includeMetadata: true }),
     }).then((response) => response.json())
     const elapsed = Date.now() - started
 

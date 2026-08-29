@@ -3,17 +3,17 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "611nft local-first multi-chain NFT mint monitor and wallet console",
+  "description": "611nft local-first multi-chain NFT mint monitor and AWP wallet console",
   "license": "MIT",
-  "author": "Zerorisklabs-V1",
+  "author": "xiaobao-ops",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Zerorisklabs-V1/611nft.git"
+    "url": "git+https://github.com/xiaobao-ops/611nft.git"
   },
   "bugs": {
-    "url": "https://github.com/Zerorisklabs-V1/611nft/issues"
+    "url": "https://github.com/xiaobao-ops/611nft/issues"
   },
-  "homepage": "https://github.com/Zerorisklabs-V1/611nft#readme",
+  "homepage": "https://github.com/xiaobao-ops/611nft#readme",
   "engines": {
     "node": ">=22"
   },
@@ -23,7 +23,7 @@
     "multi-wallet",
     "ethereum",
     "robinhood-chain",
-    "local-wallet"
+    "awp-wallet"
   ],
   "scripts": {
     "dev": "concurrently -k \"npm:server\" \"npm:client\"",

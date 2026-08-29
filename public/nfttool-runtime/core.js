@@ -101,6 +101,15 @@ function invalidateWritePreviews(state = runtimeState) {
 export const runtimeState = {
   routeName: 'walletManager',
   wallets: [],
+  walletProvider: {
+    kind: 'awp',
+    management: {
+      createWallets: true,
+      importPrivateKeys: false,
+      exportPrivateKeys: false,
+      removeWallets: false,
+    },
+  },
   chains: [],
   selected: storedSelection(),
   chainId: Number(localStorage.getItem(ACTIVE_CHAIN_KEY) || 1),
@@ -522,6 +531,7 @@ export function bindWalletChecks(root, state = runtimeState, selector = '[data-w
 export async function refreshRuntimeData() {
   const [walletData, chainData] = await Promise.all([api('/api/wallets'), api('/api/chains')]);
   runtimeState.wallets = walletData.wallets || [];
+  runtimeState.walletProvider = walletData.walletProvider || runtimeState.walletProvider;
   runtimeState.chains = chainData.chains || [];
   if (!runtimeState.chains.some((chain) => Number(chain.id) === Number(runtimeState.chainId))) {
     runtimeState.chainId = Number(runtimeState.chains[0]?.id || 1);

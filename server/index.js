@@ -1,8 +1,7 @@
 import "./env.js"
 import express from "express"
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto"
-import { spawn } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { connect as connectSocket } from "node:net"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -10,7 +9,6 @@ import { fileURLToPath } from "node:url"
 import { DatabaseSync } from "node:sqlite"
 import {
   createPublicClient,
-  createWalletClient,
   custom,
   defineChain,
   encodeFunctionData,
@@ -71,8 +69,7 @@ import { ABORT_REASON, createNonceAllocator, sendersOf } from "./execution-polic
 import { assignTransferGas, estimateTransferGas } from "./transfer-gas.js"
 import { baseNonce, pendingGap } from "./nonce-baseline.js"
 import { broadcastConnectionFailure, broadcastUncertain } from "./broadcast-classify.js"
-import { sendSignedTransaction } from "./broadcast-reconcile.js"
-import { prepareSweepEnvelope, serializeSweepEnvelope, signSweepEnvelope, sweepEntryFromEnvelope } from "./sweep-envelope.js"
+import { sweepEntryFromEnvelope } from "./sweep-envelope.js"
 import { burstConcurrencyFor } from "./burst-limit.js"
 import { createNftHoldingsIndexer } from "./nft-holdings.js"
 import { buildTokenCollectPlan, queryContractHoldings } from "./token-collect.js"
@@ -82,29 +79,22 @@ import {
   preflightSignatureTransaction,
 } from "./signature-lab.js"
 import {
-  createLocalWalletProfiles,
-  exportLocalWalletProfiles,
-  importLocalWalletProfiles,
-  localWalletAccount,
-  localWalletRegistry,
-  mergeWalletRegistries,
+  createAwpWalletProvider,
   normalizeWalletGroup,
-  readLocalWalletProfiles,
   requireWalletCapability,
-  removeLocalWalletProfiles,
 } from "./wallet-provider.js"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(__dirname)
 const WALLET_ROOT = process.env.WALLET_BOARD_WALLET_ROOT || join(homedir(), ".openclaw-wallet")
 const WALLETS_PATH = join(WALLET_ROOT, "wallets.json")
-const ROOT_ENV_PATH = process.env.WALLET_KEYS_FILE || join(ROOT, ".env")
 const DB_PATH = process.env.WALLET_BOARD_DB_PATH || join(ROOT, "wallet-board.sqlite")
 const DIST_ROOT = join(ROOT, "dist")
 const NFTTOOL_RUNTIME_ROOT = join(DIST_ROOT, "nfttool-runtime")
 const PORT = Number(process.env.WALLET_BOARD_PORT || 8791)
 const API_HOST = process.env.WALLET_BOARD_API_HOST || "127.0.0.1"
 const API_HOSTS = resolveListenHosts(API_HOST, process.env.WALLET_BOARD_API_HOSTS)
+const walletProvider = createAwpWalletProvider({ root: ROOT, walletRoot: WALLET_ROOT, walletsPath: WALLETS_PATH })
 // Measured on 2026-08-29 from this machine, warm keepalive connection, p50 of 10 samples:
 // robinhood-rpc.publicnode.com answers in 75ms and rpc.mainnet.chain.robinhood.com in 234ms,
 // and publicnode was 4 blocks (~0.4s) ahead of the official endpoint at the same instant.
@@ -391,17 +381,8 @@ function taskId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
 }
 
-function ensureWalletRoot() {
-  if (!existsSync(WALLET_ROOT)) mkdirSync(WALLET_ROOT, { recursive: true, mode: 0o700 })
-}
-
-function readExternalRegistry() {
-  if (!existsSync(WALLETS_PATH)) return {}
-  return JSON.parse(readFileSync(WALLETS_PATH, "utf8"))
-}
-
 function readRegistry() {
-  return mergeWalletRegistries(readExternalRegistry(), localWalletRegistry(ROOT_ENV_PATH))
+  return walletProvider.registry()
 }
 
 function hostnameFor(value) {
@@ -666,7 +647,7 @@ const nftMediaResolver = createNftMediaResolver({
   cacheDir: process.env.NFT_MEDIA_CACHE_DIR || join(ROOT, ".runtime", "nft-media"),
 })
 const nftListingService = createNftListingService({
-  accountForWallet: (walletId) => localWalletAccount(ROOT_ENV_PATH, walletId),
+  accountForWallet: (walletId) => walletProvider.accountForWallet(walletId),
   clientForChain: (chainId) => publicClient(chainId),
 })
 const nftOfferService = createOfferAcceptService({
@@ -734,7 +715,7 @@ function openSeaMintServiceFor(body = {}) {
     clientForChain: (chainId) => publicClient(chainId),
     // resolve() hands back a profile object; the mint service wants the URL alone.
     writeRpcForChain: (chainId) => rpcProfiles.resolve(rpcProfileId, chainId, rpcProfileRef).url,
-    accountForWallet: (walletId) => localWalletAccount(ROOT_ENV_PATH, walletId),
+    accountForWallet: (walletId) => walletProvider.accountForWallet(walletId),
     fetchWalletEligibilities: fetchOpenSeaWalletEligibilities,
   })
 }
@@ -1022,63 +1003,6 @@ const radarTimer = setInterval(() => {
 }, radarPollMs)
 radarTimer.unref?.()
 
-function walletEnv(walletId) {
-  const env = { ...process.env }
-  delete env.AWP_SESSION_ID
-  delete env.AWP_AGENT_ID
-  if (walletId !== "default") env.AWP_AGENT_ID = walletId
-  return env
-}
-
-function parseJsonLoose(text) {
-  const trimmed = String(text || "").trim()
-  if (!trimmed) return {}
-  const direct = JSON.parse(trimmed)
-  return direct
-}
-
-function runAwp(walletId, args, { timeoutMs = 120000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("awp-wallet", args, {
-      cwd: ROOT,
-      env: walletEnv(walletId),
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-    let stdout = ""
-    let stderr = ""
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM")
-      const error = new Error("awp-wallet 广播超时，结果待确认")
-      error.code = "BROADCAST_UNCERTAIN"
-      error.broadcastUncertain = true
-      reject(error)
-    }, timeoutMs)
-    child.stdout.on("data", (data) => {
-      stdout += data.toString()
-    })
-    child.stderr.on("data", (data) => {
-      stderr += data.toString()
-    })
-    child.on("error", (error) => {
-      clearTimeout(timer)
-      reject(error)
-    })
-    child.on("close", (code) => {
-      clearTimeout(timer)
-      if (code !== 0) {
-        const message = stderr.trim() || stdout.trim() || `awp-wallet exited ${code}`
-        reject(new Error(message.replace(/https?:\/\/[^\s)]+/gi, "<rpc>")))
-        return
-      }
-      try {
-        resolve(parseJsonLoose(stdout))
-      } catch {
-        resolve({ stdout: stdout.trim(), stderr: stderr.trim() })
-      }
-    })
-  })
-}
-
 function uncertainBroadcastError(error) {
   const result = error instanceof Error ? error : new Error(String(error || "广播结果待确认"))
   result.code = "BROADCAST_UNCERTAIN"
@@ -1245,89 +1169,11 @@ async function sendRawTx({
   const wallet = requireWallet(walletId)
   const chain = chainConfig(chainId)
   if (sweep) requireWalletCapability(wallet, "sweep")
+  if ([gasPrice, maxFeePerGas, maxPriorityFeePerGas].some((value) => value !== null && value !== undefined && value !== "")) {
+    requireWalletCapability(wallet, "customFees")
+  }
   const selectedProfile = verifiedProfile || await rpcProfiles.verifyChain(rpcProfileId || "main", chain.id, rpcProfileRef)
   const endpoints = selectedProfile.endpoints || [{ id: selectedProfile.endpointId, url: selectedProfile.url, host: selectedProfile.host }]
-  const localAccount = localWalletAccount(ROOT_ENV_PATH, walletId)
-  if (localAccount) {
-    const sendAtEndpoint = async (endpoint) => {
-      const writerClient = createPublicClient({ chain: chain.viem, transport: http(endpoint.url, { retryCount: 0 }) })
-      let envelope = null
-      let request
-      if (sweep) {
-        envelope = await prepareSweepEnvelope({
-          client: writerClient,
-          address: localAccount.address,
-          to: assertAddress(to, "接收地址"),
-          chainId: chain.id,
-          data: assertHex(data, "calldata"),
-          keepReserveWei: sweep.keepReserveWei || 0n,
-          multiplierBps: sweep.multiplierBps || 12_500n,
-        })
-        request = envelope.request
-      } else {
-        const walletClient = createWalletClient({ account: localAccount, chain: chain.viem, transport: http(endpoint.url, { retryCount: 0 }) })
-        let effectiveNonce = nonce === null || nonce === undefined || nonce === "" ? null : Number(nonce)
-        if (effectiveNonce === null) {
-          const [latest, pending] = await Promise.all([
-            writerClient.getTransactionCount({ address: localAccount.address, blockTag: "latest" }),
-            writerClient.getTransactionCount({ address: localAccount.address, blockTag: "pending" }),
-          ])
-          effectiveNonce = baseNonce({ latest, pending })
-        }
-        request = await walletClient.prepareTransactionRequest({
-          account: localAccount,
-          to: assertAddress(to, "接收地址"),
-          value: BigInt(valueWei || "0"),
-          data: assertHex(data, "calldata"),
-          nonce: effectiveNonce,
-          ...(gas !== null && gas !== undefined && gas !== "" ? { gas: BigInt(gas) } : {}),
-          ...(gasPrice !== null && gasPrice !== undefined && gasPrice !== "" ? { gasPrice: BigInt(gasPrice), type: "legacy" } : {}),
-          ...(maxFeePerGas !== null && maxFeePerGas !== undefined && maxFeePerGas !== "" ? { maxFeePerGas: BigInt(maxFeePerGas), type: "eip1559" } : {}),
-          ...(maxPriorityFeePerGas !== null && maxPriorityFeePerGas !== undefined && maxPriorityFeePerGas !== "" ? { maxPriorityFeePerGas: BigInt(maxPriorityFeePerGas), type: "eip1559" } : {}),
-        })
-      }
-      const serializedTransaction = envelope
-        ? await signSweepEnvelope({ account: localAccount, envelope })
-        : await localAccount.signTransaction(request)
-      const publicEnvelope = envelope ? serializeSweepEnvelope(envelope) : null
-      try {
-        const sent = await sendSignedTransaction({
-          client: writerClient,
-          serializedTransaction,
-          address: localAccount.address,
-          nonce: request.nonce,
-          isUncertain: broadcastUncertain,
-        })
-        return { ...sent, endpoint, nonce: Number(request.nonce), envelope: publicEnvelope }
-      } catch (error) {
-        if (publicEnvelope && error && typeof error === "object") error.sweepEnvelope = publicEnvelope
-        throw error
-      }
-    }
-    const sent = sweep
-      ? await sendAtEndpoint(endpoints[0])
-      : await broadcastWithFailover({
-      endpoints,
-      isUncertain: broadcastUncertain,
-      isConnectionFailure: broadcastConnectionFailure,
-        send: sendAtEndpoint,
-      })
-    return {
-      txHash: sent.txHash,
-      address: localAccount.address,
-      signer: "root-env",
-      nonce: sent.nonce,
-      envelope: sent.envelope,
-      reconciled: Boolean(sent.reconciled),
-      reconciliation: sent.reconciliation ? jsonSafe(sent.reconciliation) : null,
-      rpcProfileId: selectedProfile.id,
-      rpcProfileRef: selectedProfile.profileRef || rpcProfileRef || "",
-      rpcHost: sent.endpoint.host || selectedProfile.host,
-    }
-  }
-  if ([gasPrice, maxFeePerGas, maxPriorityFeePerGas].some((value) => value !== null && value !== undefined && value !== "")) {
-    throw new Error("自定义交易费用需要使用本地密钥钱包")
-  }
   const effectiveNonce = nonce === null || nonce === undefined || nonce === ""
     ? await baseNonceFor(chain.id, wallet.address, endpoints[0])
     : Number(nonce)
@@ -1337,18 +1183,18 @@ async function sendRawTx({
     isConnectionFailure: broadcastConnectionFailure,
     send: async (endpoint) => {
       const args = [
-      "--chain", String(chainId),
-      "--rpc-url", endpoint.url,
-      "--native-symbol", chain.nativeSymbol,
-      "send-tx",
-      "--to", assertAddress(to, "接收地址"),
-      "--value", String(valueWei),
-      "--data", assertHex(data, "calldata"),
-      "--pretty",
-    ]
-  args.push("--nonce", String(effectiveNonce))
-    if (gas !== null && gas !== undefined && gas !== "") args.push("--gas", String(gas))
-      const result = await runAwp(walletId, args, { timeoutMs: 180000 })
+        "--chain", String(chainId),
+        "--rpc-url", endpoint.url,
+        "--native-symbol", chain.nativeSymbol,
+        "send-tx",
+        "--to", assertAddress(to, "接收地址"),
+        "--value", String(valueWei),
+        "--data", assertHex(data, "calldata"),
+        "--pretty",
+      ]
+      args.push("--nonce", String(effectiveNonce))
+      if (gas !== null && gas !== undefined && gas !== "") args.push("--gas", String(gas))
+      const result = await walletProvider.sendTransaction(walletId, args, { timeoutMs: 180_000 })
       return { result, endpoint }
     },
   })
@@ -2066,14 +1912,6 @@ async function sendNftMintJob(job) {
         valueWei: plan.transaction.value.toString(),
         data: plan.transaction.data,
         gas: plan.gasLimit.toString(),
-        ...(localWalletAccount(ROOT_ENV_PATH, plan.wallet.id)
-          ? plan.feeModel === "eip1559"
-            ? {
-                maxFeePerGas: plan.maxFeePerGas?.toString() || null,
-                maxPriorityFeePerGas: plan.maxPriorityFeePerGas?.toString() || null,
-              }
-            : { gasPrice: plan.gasPrice?.toString() || null }
-          : {}),
       })
       const txHash = String(sent.txHash || "")
       if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) throw new Error("钱包签名器未返回有效交易哈希")
@@ -2183,8 +2021,8 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     walletCount: wallets.length,
-    localWalletCount: wallets.filter((wallet) => wallet.source === "root-env").length,
-    externalWalletCount: wallets.filter((wallet) => wallet.source !== "root-env").length,
+    localWalletCount: 0,
+    externalWalletCount: wallets.length,
     port: PORT,
   })
 })
@@ -2241,6 +2079,7 @@ app.post("/api/opensea-mint/preview", async (req, res, next) => {
     const contractAddress = getAddress(String(req.body.contractAddress || ""))
     const walletIds = normalizeWalletIds(req.body.walletIds)
     if (!walletIds.length) throw httpError(400, "请先选择要铸造的钱包")
+    for (const walletId of walletIds) requireWalletCapability(requireWallet(walletId), "signExactEnvelope")
     const quantity = BigInt(req.body.quantity || 1)
     const executionMode = req.body.executionMode === "scheduled" ? "scheduled" : "immediate"
     const saleMode = req.body.saleMode || "auto"
@@ -2904,8 +2743,9 @@ app.get("/api/wallets", (_req, res) => {
   const wallets = listWallets()
   res.json({
     wallets,
-    localWalletCount: wallets.filter((wallet) => wallet.source === "root-env").length,
-    externalWalletCount: wallets.filter((wallet) => wallet.source !== "root-env").length,
+    walletProvider: walletProvider.summary(),
+    localWalletCount: 0,
+    externalWalletCount: wallets.length,
   })
 })
 
@@ -2932,67 +2772,6 @@ app.patch("/api/wallets/:id", (req, res) => {
       updated_at = excluded.updated_at
   `).run(req.params.id, label, group, note, favorite, risk, proxyIp, exchangeAddress, now())
   res.json({ ok: true, wallet: listWallets().find((wallet) => wallet.id === req.params.id) })
-})
-
-app.post("/api/wallets/import", (req, res, next) => {
-  try {
-    const created = importLocalWalletProfiles({
-      envPath: ROOT_ENV_PATH,
-      text: req.body.text,
-      prefix: req.body.prefix || "imported",
-      reservedIds: Object.keys(readExternalRegistry()),
-    })
-    const statement = db.prepare(`
-      INSERT INTO wallet_meta (wallet_id, label, wallet_group, updated_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(wallet_id) DO UPDATE SET
-        label = excluded.label,
-        wallet_group = excluded.wallet_group,
-        updated_at = excluded.updated_at
-    `)
-    for (const wallet of created) statement.run(wallet.id, wallet.label, wallet.group, now())
-    res.status(201).json({ ok: true, created, wallets: listWallets() })
-  } catch (error) {
-    error.status = error.status || 400
-    next(error)
-  }
-})
-
-app.post("/api/wallets/export", (req, res, next) => {
-  try {
-    if (String(req.body.phrase || "").trim() !== "确认导出私钥") {
-      throw httpError(400, "请输入“确认导出私钥”以确认导出本地私钥")
-    }
-    const walletIds = normalizeWalletIds(req.body.walletIds)
-    const metas = metaMap()
-    const groupsById = Object.fromEntries(walletIds.map((id) => [id, metas[id]?.wallet_group || ""]))
-    const text = exportLocalWalletProfiles({ envPath: ROOT_ENV_PATH, profileIds: walletIds, groupsById })
-    res.setHeader("Cache-Control", "no-store")
-    res.setHeader("Content-Type", "text/plain; charset=utf-8")
-    res.setHeader("Content-Disposition", `attachment; filename="nfttool-wallets-${Date.now()}.txt"`)
-    res.send(text)
-  } catch (error) {
-    error.status = error.status || 400
-    next(error)
-  }
-})
-
-app.delete("/api/wallets", (req, res, next) => {
-  try {
-    const walletIds = normalizeWalletIds(req.body.walletIds)
-    const localIds = new Set(readLocalWalletProfiles(ROOT_ENV_PATH).profiles.map((wallet) => wallet.id))
-    for (const id of walletIds) {
-      if (!localIds.has(id)) throw httpError(400, `只可移除本地密钥钱包：${id}`)
-    }
-    const result = removeLocalWalletProfiles({ envPath: ROOT_ENV_PATH, profileIds: walletIds })
-    const placeholders = walletIds.map(() => "?").join(",")
-    db.prepare(`DELETE FROM wallet_meta WHERE wallet_id IN (${placeholders})`).run(...walletIds)
-    db.prepare(`DELETE FROM balance_cache WHERE wallet_id IN (${placeholders})`).run(...walletIds)
-    res.json({ ok: true, ...result, wallets: listWallets() })
-  } catch (error) {
-    error.status = error.status || 400
-    next(error)
-  }
 })
 
 app.post("/api/wallets/bulk-group", (req, res, next) => {
@@ -3043,11 +2822,13 @@ app.post("/api/network/test-proxy", (req, res, next) => {
 
 app.post("/api/wallets/create", async (req, res, next) => {
   try {
-    const count = Math.max(1, Math.min(500, Number(req.body.count || 1)))
+    const requestedCount = Number(req.body.count || 1)
+    const requestedStart = Number(req.body.start || 1)
+    if (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > 500) throw httpError(400, "创建数量必须是 1 到 500 的整数")
+    if (!Number.isSafeInteger(requestedStart) || requestedStart < 0) throw httpError(400, "起始编号必须是非负整数")
+    const count = requestedCount
     const prefix = String(req.body.prefix || "wallet").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32) || "wallet"
-    const start = Number(req.body.start || 1)
-    const externalIds = Object.keys(readExternalRegistry())
-    const { created, skipped } = createLocalWalletProfiles({ envPath: ROOT_ENV_PATH, prefix, start, count, reservedIds: externalIds })
+    const { created, skipped } = await walletProvider.createWallets({ prefix, start: requestedStart, count })
     res.json({ ok: true, created, skipped, totalCount: listWallets().length })
   } catch (error) {
     next(error)

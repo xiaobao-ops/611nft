@@ -69,8 +69,26 @@ function walletRows(state) {
   }).join('');
 }
 
+function walletManagement(state) {
+  return {
+    createWallets: false,
+    importPrivateKeys: false,
+    exportPrivateKeys: false,
+    removeWallets: false,
+    ...(state.walletProvider?.management || {}),
+  };
+}
+
 export function renderWalletManager({ state, openDialog, render, toast }) {
   const ids = selectedIds(state);
+  const management = walletManagement(state);
+  const selectedWallets = ids.map((id) => state.wallets.find((wallet) => wallet.id === id)).filter(Boolean);
+  const canRemoveWallets = management.removeWallets
+    && selectedWallets.length === ids.length
+    && selectedWallets.every((wallet) => wallet.capabilities?.removeWallet !== false);
+  const canExportPrivateKeys = management.exportPrivateKeys
+    && selectedWallets.length === ids.length
+    && selectedWallets.every((wallet) => wallet.capabilities?.exportPrivateKey !== false);
   const visible = visibleWallets(state);
   const groupFilter = groupFilterToken(state);
   const groups = groupWallets(state.wallets);
@@ -81,13 +99,13 @@ export function renderWalletManager({ state, openDialog, render, toast }) {
     html: `
       ${networkBar({ state, includeAsset: false, mode: 'readOnly' })}
       <div class="toolbar wallet-toolbar">
-        <button class="button primary" id="create-wallets" type="button">创建钱包</button>
-        <button class="button primary" id="import-wallets" type="button">导入私钥</button>
-        <button class="button danger" id="delete-wallets" type="button" ${ids.length ? '' : 'disabled'}>删除选中</button>
+        ${management.createWallets ? '<button class="button primary" id="create-wallets" type="button">创建钱包</button>' : ''}
+        ${management.importPrivateKeys ? '<button class="button primary" id="import-wallets" type="button">导入私钥</button>' : ''}
+        ${management.removeWallets ? `<button class="button danger" id="delete-wallets" type="button" ${ids.length && canRemoveWallets ? '' : 'disabled'}>删除选中</button>` : ''}
         <button class="button primary" id="refresh-balances" type="button">余额查询</button>
         <button class="button primary" id="set-group" type="button" ${ids.length ? '' : 'disabled'}>设置分组</button>
         <button class="button secondary" id="clear-group" type="button" ${ids.length ? '' : 'disabled'}>清除分组</button>
-        <button class="button secondary" id="export-wallets" type="button" ${ids.length ? '' : 'disabled'}>导出</button>
+        ${management.exportPrivateKeys ? `<button class="button secondary" id="export-wallets" type="button" ${ids.length && canExportPrivateKeys ? '' : 'disabled'}>导出</button>` : ''}
         <div class="toolbar-spacer"></div>
         <label class="compact-field"><span>分组</span><select id="wallet-group-filter"><option value="${ALL_GROUP_FILTER}" ${groupFilter === ALL_GROUP_FILTER ? 'selected' : ''}>全部</option>${groups.map((group) => {
           const token = tokenForGroup(group.key);

@@ -2,7 +2,7 @@
 
 ## 目标
 
-611nft 2.0 是单一 React 19 + Vite 前端和 Express 服务组成的多链本地工作台，同时保持三个原则：真实链上数据、私钥只留在服务端 Wallet Provider、任何资产写入必须在服务端二次确认。
+611nft 2.0 是单一 React 19 + Vite 前端和 Express 服务组成的多链本地工作台，同时保持三个原则：真实链上数据、私钥只留在外部 AWP Wallet Provider、任何资产写入必须在服务端二次确认。
 
 ## 架构
 
@@ -20,16 +20,15 @@ flowchart LR
   API --> RT["Replay / batch / heartbeat stream"]
   API --> ALERT["Alert rules + delivery"]
   ALERT --> TG["Optional Telegram"]
-  API --> WP["Wallet Provider"]
-  WP --> LOCAL["private: root .env"]
-  WP --> AWP["public: AWP adapter"]
+  API --> WP["AWP-only Wallet Provider"]
+  WP --> AWP["~/.openclaw-wallet profiles"]
   API --> PLAN["OpenSea mint planning"]
 ```
 
 - `src/`：唯一 React 19 源码，包含外壳、15 条静态路由、报警和交易记录页面。
 - `public/nfttool-runtime/`：钱包、铸造和 NFT 管理的纯浏览器运行时，由同一次 Vite 构建复制到 `dist/`。
-- `server/index.js`：API、SQLite、本地签名、Preview/Confirm 状态机。
-- `server/wallet-provider.js`：统一 Wallet Provider 描述、能力查询，以及私有仓库逐行私钥 profile 的解析、生成和账户加载。
+- `server/index.js`：API、SQLite、AWP 子进程调用、Preview/Confirm 状态机。
+- `server/wallet-provider.js`：AWP-only profile 枚举、创建、能力查询与 fail-closed 签名适配器；不读取项目 `.env` 私钥。
 - `server/opensea-mint/`：完整阶段身份、逐钱包资格、nonce 分配和未知广播对账。
 - `server/sweep-envelope.js`：在同一写 RPC 上准备并冻结归集的余额、nonce、Gas、费用和 value。
 - `server/mint-monitor.js`：链上日志扫描、供应量、Mint 价格、媒体、lifetime minters 与 canonical Mint 生命周期。
@@ -54,13 +53,13 @@ Live Mint 生产主数据源仍是自建多链 RPC/WSS/SSE。MCT `rankv3`/`minti
 
 ## 数据与信任边界
 
-高价值资产：根 `.env` 私钥材料、confirmation token、认证读/写 RPC/WSS URL、远程 API token、Telegram bot token/chat ID、待广播交易。
+高价值资产：AWP profile 密钥材料、confirmation token、认证读/写 RPC/WSS URL、远程 API token、Telegram bot token/chat ID、待广播交易。
 
 受信任：运行主机、项目根 `.env`、显式配置的 RPC。
 
 不受信任：浏览器请求、合集/provider 数据、RPC/WSS 响应、NFT metadata、OpenSea 交易计划、Blockscout、SeaDrop 日志、Telegram 响应和代理 API。
 
-SQLite 保存钱包 profile ID/地址、标签、余额、任务、交易摘要、minter 游标，以及情报表 `deployer_profiles`、`collection_flags`、`seadrop_drop_logs`/`seadrop_drops`/`seadrop_checkpoints`、`alert_rules`/`alert_deliveries`。它不保存私钥、助记词、Telegram token 或认证 RPC URL。私钥仅从权限为 `600` 的根 `.env` 读取，不进入 API 响应。
+SQLite 保存钱包 profile ID/地址、标签、余额、任务、交易摘要、minter 游标，以及情报表 `deployer_profiles`、`collection_flags`、`seadrop_drop_logs`/`seadrop_drops`/`seadrop_checkpoints`、`alert_rules`/`alert_deliveries`。它不保存私钥、助记词、Telegram token 或认证 RPC URL。项目只读取 AWP 注册表的公开地址元数据，密钥材料不进入 API 响应。
 
 ## Mint 监控与供应量
 
@@ -120,7 +119,7 @@ metadata/media 解析只允许 HTTP(S)，在解析和连接前拒绝 loopback、
 
 - Vanilla JS 与独立 eRPC 被 React/Vite 和进程内 RPC pool 替代。
 - 浏览器下行由 SSE 承担；上游链数据使用 WSS 唤醒与 HTTP 区间补洞，Mint job 仍通过轮询精确收敛。
-- 根 `.env` 的逐行裸私钥继续兼容，首个钱包稳定映射为 `default`；新建 profile 使用注释标记保持 ID 稳定。
+- 项目 `.env` 裸私钥兼容已移除；钱包枚举和创建统一由外部 `awp-wallet` profile 管理。
 - 支持链从 Ethereum/Robinhood 扩展到多链。
 - 新增 SQLite 和资产管理操作，安全边界相应扩大。
 
@@ -154,7 +153,7 @@ metadata/media 解析只允许 HTTP(S)，在解析和连接前拒绝 loopback、
 
 ### 2026-08-14 - 合并多链 Dashboard 2.0
 
-**变更内容**：导入 React/Vite、多链直接监控、本地钱包、SQLite 和通用资产任务；移除旧运行入口。
+**变更内容**：导入 React/Vite、多链直接监控、AWP 钱包、SQLite 和通用资产任务；移除旧运行入口。
 
 **变更理由**：将下载版的大规模功能更新纳入受版本管理的 611nft 主线，同时修复审查发现的远程未鉴权、客户端确认、实时详情和任务状态风险。
 

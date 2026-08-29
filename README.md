@@ -1,11 +1,11 @@
 <div align="center">
-  <img src="apps/web/assets/611nft-logo.png" width="112" alt="611nft logo">
+  <img src="src/assets/611nft-logo-ui.png" width="112" alt="611nft logo">
   <h1>611nft</h1>
-  <p><strong>本地优先的多链 NFT Mint 监控与钱包工作台</strong></p>
-  <p>Local-first multi-chain NFT mint monitor and wallet console.</p>
+  <p><strong>本地优先的多链 NFT Mint 监控与 AWP 钱包工作台</strong></p>
+  <p>Local-first multi-chain NFT mint monitor and AWP wallet console.</p>
 </div>
 
-611nft 2.0 使用单一 React 19 + Vite 前端和 Express 服务。根 `src/` 是唯一 React 源码，保留功能的纯浏览器运行时位于 `public/nfttool-runtime/`，一次 `vite build` 同时生成 `/tool/*` 与 OpenSea 页面。服务默认只监听 `127.0.0.1`，本地私钥不进入浏览器、API 响应或 SQLite。
+611nft 2.0 使用单一 React 19 + Vite 前端和 Express 服务。根 `src/` 是唯一 React 源码，保留功能的纯浏览器运行时位于 `public/nfttool-runtime/`，一次 `vite build` 同时生成 `/tool/*` 与 OpenSea 页面。服务默认只监听 `127.0.0.1`，钱包密钥由外部 `awp-wallet` profile 持有，不进入项目 `.env`、浏览器、API 响应或 SQLite。
 
 > [!WARNING]
 > 该工具能够签名并广播不可撤销的链上交易。请使用专用低余额钱包，先做 Preview，核对链、合约、calldata、金额、Gas 和接收地址。不要把服务直接暴露到不可信网络。
@@ -25,7 +25,7 @@
 - 合集供应量、Mint 价格、钱包限额、最近 Mint、媒体和全历史独立 Mint 钱包统计。
 - 上游 WSS 多端点切换与 HTTP 补洞，浏览器 SSE 支持游标重放、同合集批次、回撤、增量补全和 60 秒 MINT/S 速率。
 - 多窗口 Trending、部署者画像、个人合集标记、SeaDrop 开售雷达，以及 SSE/Telegram 报警规则。
-- 本地钱包 profile 发现、创建、标签、分组、备注、收藏和风险标记；兼容逐行私钥与带 profile 标记的生成钱包。
+- AWP wallet profile 发现、创建、标签、分组、备注、收藏和风险标记。
 - 原生币/ERC-20 余额、one-to-many、many-to-one、many-to-many、approve/revoke 与 contract call。
 - NFT Mint 最多 200 个钱包、并发上限 32、价值上限、广播前重报价和再次预检。
 - SQLite 持久化钱包元数据、余额、任务、交易日志和 lifetime minter 回填游标。
@@ -36,7 +36,7 @@
 - NFT Mint 广播前重新检查链、目标 bytecode、calldata、价格、Gas、余额和配置的价值上限。
 - 非回环监听必须配置 `WALLET_BOARD_API_TOKEN`，API 使用 `Authorization: Bearer <token>`。
 - 默认回环模式不要求 token，方便本机 UI 和 CLI；仍应避免访问恶意网页或运行不可信本机程序。
-- SQLite 不保存私钥或助记词，但根 `.env` 包含本地签名材料；`.env` 与 SQLite 都应按敏感本地数据保护。
+- SQLite 不保存私钥、助记词或 AWP 密钥材料；AWP profile、`.env` 与 SQLite 都应按敏感本地数据保护。
 - NFT metadata 代理拒绝本机、私网、链路本地和保留地址。
 
 更完整的信任边界和状态机见 [`DESIGN.md`](DESIGN.md)，安全报告方式见 [`SECURITY.md`](SECURITY.md)。
@@ -45,14 +45,14 @@
 
 - Node.js 22+
 - npm
-- 至少一个专用低余额钱包私钥，按逐行格式放入根 `.env`
+- `awp-wallet` 在 `PATH` 中，并已配置操作者自己的隔离低余额 profiles
 
-只读监控不需要钱包 profile。任何 Mint、转账、授权或 contract call 都需要可用的本地 profile。
+只读监控不需要钱包 profile。任何 Mint、转账、授权或 contract call 都需要可用的 AWP profile；provider 不支持的确定性 envelope、全余额归集、SIWE 或 EIP-712 签名会在广播前明确拒绝。
 
 ## 安装与启动
 
 ```bash
-git clone https://github.com/Zerorisklabs-V1/611nft.git
+git clone https://github.com/xiaobao-ops/611nft.git
 cd 611nft
 npm ci
 cp .env.example .env
@@ -70,7 +70,7 @@ npm run server
 
 ## 配置
 
-根 `.env` 保存服务、RPC 配置和本地钱包。每个钱包单独占一行，只写 64 位十六进制私钥，不写变量名和 `0x`：
+根 `.env` 只保存服务、RPC 和通知配置，不保存钱包密钥：
 
 ```dotenv
 WALLET_BOARD_PORT=8791
@@ -101,8 +101,6 @@ SEADROP_LOOKBACK_BLOCKS=
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# 一个钱包一行；真实值不得提交到 Git
-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 WSS 变量使用链 key 的大写后缀：`ETHEREUM`、`BASE`、`ARBITRUM`、`OPTIMISM`、`POLYGON`、`BSC`、`ZKS`、`SHIB`、`ROBINHOOD`。服务读取 `WSS_RPC_URL_<CHAIN_KEY>` 和 `WSS_RPC_URLS_<CHAIN_KEY>`，并兼容 `<CHAIN_KEY>_WSS_RPC_URL(S)`。显式配置任一 WSS 值后只使用该配置池；连接失败时仍由对应的 `*_RPC_URL(S)` HTTP 池扫描和补洞。
@@ -117,7 +115,7 @@ NFT TOOL 将 RPC 明确分为两条链路：Live Mint、SSE、区块扫描、余
 
 `src/routes.js` 是 15 个入口和旧地址兼容跳转的唯一清单，`src/Shell.jsx` 使用 History API、React `lazy` 与 `Suspense` 加载页面。钱包、铸造和 NFT 管理的浏览器运行时位于 `public/nfttool-runtime/`，由同一次 Vite 构建复制到 `dist/nfttool-runtime/`；报警和交易记录是独立懒加载 React chunk。仓库不再包含 Umi、Ant Design Pro、第二个 package、嵌套 lockfile 或 iframe 外部运行时。
 
-浏览器只从 Wallet Provider API 获得 profile ID、地址、标签和能力，不获得私钥。私有部署由根 `.env` 的本地 provider 签名；公开部署可接 AWP provider。业务层在发送前按能力 fail closed，尤其不会让不能签名最终 envelope 的 provider 执行全余额归集。
+浏览器只从 Wallet Provider API 获得 profile ID、地址、标签和能力，不获得私钥。公开部署只使用 AWP provider；业务层在发送前按能力 fail closed，尤其不会让不能签名最终 envelope 的 provider 执行全余额归集，也不会回退到项目 `.env` 私钥。
 
 ### 远程监听
 
@@ -142,7 +140,7 @@ Bearer token 不替代 TLS；跨不可信网络时还必须使用反向代理 TL
 
 ### 钱包 profile
 
-首个未命名私钥映射为 `default`，后续未命名私钥映射为 `wallet-002`、`wallet-003`。页面创建的钱包会在 `.env` 中写入 `# 611nft-profile: PROFILE_ID` 标记，并将文件权限固定为 `600`。不要在 Issue、PR、日志或截图中粘贴 `.env`。
+钱包枚举来自 `~/.openclaw-wallet/wallets.json`，可用 `WALLET_BOARD_WALLET_ROOT` 指向另一处 AWP 根目录。页面“创建钱包”调用 `awp-wallet init`；公开版不提供私钥导入、导出或删除接口。AWP profile 生命周期、备份和恢复均由外部钱包工具负责。
 
 ## 实时情报与报警
 
@@ -196,7 +194,7 @@ curl -sS -X POST http://127.0.0.1:8791/api/alerts/test \
 Web 流程：
 
 1. 选择链和合集，核对链上供应量与最近 Mint。
-2. 选择本地 profiles，填写数量、Token ID、并发和可选价值上限。
+2. 选择 AWP profiles，填写数量、Token ID、并发和可选价值上限。
 3. Preview 查看逐钱包预检。
 4. 点击 Mint 时服务端重新 Preview，确认后使用一次性 token 广播。
 5. 等待每个钱包进入 confirmed、failed 或 confirmation pending。
@@ -239,8 +237,8 @@ npm run sbom
 | --- | --- |
 | `src/` | 唯一 React 19/Vite 外壳、路由、报警和交易记录源码 |
 | `public/nfttool-runtime/` | 保留功能的纯浏览器运行时，由 Vite 作为静态资源构建 |
-| `server/index.js` | Express 5 API、SQLite、本地签名和任务状态机 |
-| `server/wallet-provider.js` | 根 `.env` profile 解析、生成和本地账户加载 |
+| `server/index.js` | Express 5 API、SQLite、AWP 调用和任务状态机 |
+| `server/wallet-provider.js` | AWP-only profile 枚举、创建、能力声明和签名边界 |
 | `server/opensea-mint/` | OpenSea 阶段身份、钱包资格、计划、nonce 与广播状态 |
 | `server/sweep-envelope.js` | 同一写 RPC 的余额、nonce、Gas、费用和最终归集金额 |
 | `server/mint-monitor.js` | 多链直接扫描、供应量、价格和 minter 回填 |
@@ -254,7 +252,7 @@ npm run sbom
 - 生产部署只运行一次 `vite build`；Express 必须与生成的 `dist/` 一起部署。
 - 链、RPC、OpenSea、Waypoint、Blockscout 和 metadata gateway 的 schema、限速与可用性会影响数据完整性。
 - provider 数据和本地扫描可能短暂处于不同进度；链上 `totalSupply()` 优先，读取失败时显示保守值或未知值。
-- 根 `.env` 是本地钱包的唯一签名源；升级前应独立备份、限制权限并验证地址。
+- AWP profile 生命周期由外部 `awp-wallet` 管理；升级前应独立备份并验证钱包地址。
 - 开源发布不代表经过第三方安全审计。
 
 ## 贡献与许可
@@ -267,8 +265,8 @@ npm run sbom
 
 ## English
 
-611nft 2.0 is a local-first, multi-chain NFT mint monitor and wallet console built as one React 19 + Vite frontend with an Express backend. It includes direct ERC-721/ERC-1155 scanning, SSE activity, persistent minter statistics, local profile management, balance and asset operations, and preview-first NFT mint execution.
+611nft 2.0 is a local-first, multi-chain NFT mint monitor and AWP wallet console built as one React 19 + Vite frontend with an Express backend. It includes direct ERC-721/ERC-1155 scanning, SSE activity, persistent minter statistics, AWP profile management, balance and asset operations, and preview-first NFT mint execution.
 
-Local wallet keys are read from one bare hexadecimal line per profile in the root `.env`; they are never returned to the browser or stored in SQLite. Every value-moving operation uses an immutable server preview and a short-lived one-time confirmation token. Non-loopback listeners require `WALLET_BOARD_API_TOKEN`.
+Wallet key material remains inside external `awp-wallet` profiles and is never read from the project `.env`, returned to the browser, or stored in SQLite. Every value-moving operation uses an immutable server preview and a short-lived one-time confirmation token. Non-loopback listeners require `WALLET_BOARD_API_TOKEN`.
 
 See the Chinese sections above and [`DESIGN.md`](DESIGN.md) for the complete installation, migration, API, and security model.

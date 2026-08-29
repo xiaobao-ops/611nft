@@ -165,8 +165,8 @@ export function createAdvancedMintService({
     for (const transaction of transactions) {
       const wallet = selected.find((candidate) => candidate.id === transaction.walletId)
       try {
-        if (wallet.source && wallet.source !== "root-env") {
-          throw new Error("高级费用与替换控制需要使用本地密钥钱包")
+        if (wallet.capabilities?.customFees === false) {
+          throw new Error(`钱包提供方不支持冻结高级费用与替换交易（provider=${wallet.provider || "unknown"}）`)
         }
         if (input.preflight) {
           await client.call({

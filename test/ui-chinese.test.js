@@ -47,8 +47,8 @@ test("reachable React pages do not restore removed English interface phrases", (
 test("Chinese confirmation phrases and mixed RPC errors stay Chinese", () => {
   const walletManager = source("public/nfttool-runtime/wallet-manager.js")
   const server = source("server/index.js")
-  assert.match(walletManager, /确认导出私钥/)
-  assert.match(server, /phrase \|\| ""\)\.trim\(\) !== "确认导出私钥"/)
+  assert.match(walletManager, /management\.exportPrivateKeys/)
+  assert.doesNotMatch(server, /api\/wallets\/export|确认导出私钥/)
   const translated = uiError("Gas 估算失败，签名器发送时将重试：execution reverted")
   assert.equal(translated, "Gas 估算失败，签名器发送时将重试：合约执行已在链上回退")
   assert.doesNotMatch(translated, /execution|reverted/i)

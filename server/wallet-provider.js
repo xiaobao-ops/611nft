@@ -1,43 +1,74 @@
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { dirname } from "node:path"
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
+import { spawn } from "node:child_process"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 
-export const BARE_PRIVATE_KEY_PATTERN = /^(?:0x)?[0-9a-fA-F]{64}$/
-const PROFILE_MARKER_PATTERN = /^#\s*(?:nfttool|611nft)-profile:\s*([A-Za-z0-9_-]{1,48})\s*$/i
-const GROUP_MARKER_PATTERN = /^#\s*(?:nfttool|611nft)-group:\s*(.*?)\s*$/i
+const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/
+const PROFILE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/
 
-const PROVIDER_CAPABILITIES = Object.freeze({
-  local: Object.freeze({
-    sendTransaction: true,
-    prepareOnWriterEndpoint: true,
-    signExactEnvelope: true,
-    deterministicHash: true,
-    sweep: true,
-  }),
-  awp: Object.freeze({
-    sendTransaction: true,
-    prepareOnWriterEndpoint: false,
-    signExactEnvelope: false,
-    deterministicHash: false,
-    sweep: false,
-  }),
+export const AWP_PROVIDER_CAPABILITIES = Object.freeze({
+  sendTransaction: true,
+  prepareOnWriterEndpoint: false,
+  signExactEnvelope: false,
+  deterministicHash: false,
+  sweep: false,
+  signMessage: false,
+  signTypedData: false,
+  customFees: false,
+  exportPrivateKey: false,
+  removeWallet: false,
 })
 
-function providerKind(info = {}, forcedProvider = null) {
-  if (forcedProvider === "local" || forcedProvider === "awp") return forcedProvider
-  return info.provider === "local" || info.source === "root-env" ? "local" : "awp"
+export const AWP_MANAGEMENT_CAPABILITIES = Object.freeze({
+  createWallets: true,
+  importPrivateKeys: false,
+  exportPrivateKeys: false,
+  removeWallets: false,
+})
+
+function profileId(value) {
+  const id = String(value || "")
+  if (!PROFILE_ID_PATTERN.test(id)) throw new Error(`AWP 钱包编号无效：${id || "<empty>"}`)
+  return id
 }
 
-export function walletProviderDescriptor(info = {}, { provider: forcedProvider = null } = {}) {
-  const provider = providerKind(info, forcedProvider)
-  const reportedSource = String(info.source || "external")
+function walletAddress(value, id = "") {
+  const address = String(value || "")
+  if (!ADDRESS_PATTERN.test(address)) throw new Error(`AWP 钱包 ${id || "profile"} 的地址无效`)
+  return address
+}
+
+export function walletProviderDescriptor(info = {}, id = "") {
   return {
-    address: String(info.address || ""),
-    source: provider === "local" ? "root-env" : (reportedSource === "root-env" ? "external" : reportedSource),
-    provider,
-    capabilities: { ...PROVIDER_CAPABILITIES[provider] },
+    address: walletAddress(info.address, id),
+    source: "awp",
+    provider: "awp",
+    capabilities: { ...AWP_PROVIDER_CAPABILITIES },
     createdAt: String(info.createdAt || ""),
     lastUsed: String(info.lastUsed || ""),
+  }
+}
+
+export function readAwpWalletRegistry(walletsPath) {
+  if (!existsSync(walletsPath)) return {}
+  let payload
+  try {
+    payload = JSON.parse(readFileSync(walletsPath, "utf8"))
+  } catch (error) {
+    throw new Error(`AWP 钱包注册表无法解析：${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("AWP 钱包注册表必须是 profile 对象")
+  }
+  return Object.fromEntries(Object.entries(payload).map(([rawId, info]) => {
+    const id = profileId(rawId)
+    if (!info || typeof info !== "object" || Array.isArray(info)) throw new Error(`AWP 钱包 ${id} 的记录无效`)
+    return [id, walletProviderDescriptor(info, id)]
+  }))
+}
+
+export function walletProviderSummary() {
+  return {
+    kind: "awp",
+    management: { ...AWP_MANAGEMENT_CAPABILITIES },
   }
 }
 
@@ -46,7 +77,13 @@ export function requireWalletCapability(wallet, capability) {
   const provider = wallet?.provider || "unknown"
   const detail = capability === "sweep"
     ? "该钱包提供方不能保证在同一写入 RPC 上准备交易、签名最终 envelope 并得到确定性哈希"
-    : `钱包提供方不支持能力：${capability}`
+    : capability === "signMessage"
+      ? "该钱包提供方不支持消息签名"
+      : capability === "signTypedData"
+        ? "该钱包提供方不支持 EIP-712 typed-data 签名"
+        : capability === "customFees"
+          ? "该钱包提供方不支持冻结自定义交易费用"
+          : `钱包提供方不支持能力：${capability}`
   const error = new Error(`${detail}（provider=${provider}）`)
   error.code = "WALLET_CAPABILITY_UNSUPPORTED"
   error.status = 400
@@ -64,270 +101,143 @@ export function normalizeWalletGroup(value) {
   return output.trim().slice(0, 80)
 }
 
-function normalizePrivateKey(value) {
-  const key = String(value || "").trim()
-  if (!BARE_PRIVATE_KEY_PATTERN.test(key)) throw new Error("本地钱包私钥必须正好包含 64 个十六进制字符")
-  return key.startsWith("0x") ? key : `0x${key}`
-}
-
-function automaticProfileId(index) {
-  return index === 0 ? "default" : `wallet-${String(index + 1).padStart(3, "0")}`
-}
-
-function writeWalletFile(envPath, text) {
-  mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 })
-  writeFileSync(envPath, text.endsWith("\n") ? text : `${text}\n`, { mode: 0o600 })
-  chmodSync(envPath, 0o600)
-}
-
-function nonWalletLines(text) {
-  const output = []
-  for (const sourceLine of String(text || "").split(/\r?\n/)) {
-    const line = sourceLine.trim()
-    if (PROFILE_MARKER_PATTERN.test(line) || GROUP_MARKER_PATTERN.test(line) || BARE_PRIVATE_KEY_PATTERN.test(line)) continue
-    output.push(sourceLine)
-  }
-  while (output.length && !output[0].trim()) output.shift()
-  while (output.length && !output.at(-1).trim()) output.pop()
-  return output
-}
-
-function profileBlock(profiles) {
-  return profiles.flatMap((profile) => {
-    const group = normalizeWalletGroup(profile.group)
-    return [
-      `# nfttool-profile: ${profile.id}`,
-      ...(group ? [`# nfttool-group: ${group}`] : []),
-      normalizePrivateKey(profile.privateKey).slice(2),
-    ]
+function accountAdapter(wallet) {
+  return Object.freeze({
+    address: wallet.address,
+    type: "local",
+    source: "custom",
+    capabilities: wallet.capabilities,
+    async signMessage() {
+      requireWalletCapability(wallet, "signMessage")
+    },
+    async signTransaction() {
+      requireWalletCapability(wallet, "signExactEnvelope")
+    },
+    async signTypedData() {
+      requireWalletCapability(wallet, "signTypedData")
+    },
   })
 }
 
-export function sanitizeProfileId(value, fallback = "wallet") {
-  return String(value || fallback).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 48) || fallback
-}
-
-export function parseLocalWalletProfiles(text) {
-  const profiles = []
-  const invalidLines = []
-  let pendingId = ""
-  let pendingGroup = ""
-  let keyIndex = 0
-
-  for (const [offset, sourceLine] of String(text || "").split(/\r?\n/).entries()) {
-    const line = sourceLine.trim()
-    if (!line) continue
-    const marker = PROFILE_MARKER_PATTERN.exec(line)
-    if (marker) {
-      pendingId = sanitizeProfileId(marker[1])
-      pendingGroup = ""
-      continue
-    }
-    const groupMarker = GROUP_MARKER_PATTERN.exec(line)
-    if (groupMarker) {
-      if (pendingId) pendingGroup = normalizeWalletGroup(groupMarker[1])
-      continue
-    }
-    if (line.startsWith("#") || /^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line)) continue
-    if (!BARE_PRIVATE_KEY_PATTERN.test(line)) {
-      invalidLines.push(offset + 1)
-      pendingId = ""
-      pendingGroup = ""
-      continue
-    }
-
-    const privateKey = normalizePrivateKey(line)
-    const account = privateKeyToAccount(privateKey)
-    profiles.push({
-      id: pendingId || automaticProfileId(keyIndex),
-      address: account.address,
-      account,
-      privateKey,
-      source: "root-env",
-      group: pendingGroup,
-    })
-    pendingId = ""
-    pendingGroup = ""
-    keyIndex += 1
-  }
-
-  const ids = new Set()
-  const addresses = new Set()
-  for (const profile of profiles) {
-    const addressKey = profile.address.toLowerCase()
-    if (ids.has(profile.id)) throw new Error(`本地钱包编号重复：${profile.id}`)
-    if (addresses.has(addressKey)) throw new Error(`本地钱包地址重复：${profile.address}`)
-    ids.add(profile.id)
-    addresses.add(addressKey)
-  }
-
-  return { profiles, invalidLines }
-}
-
-export function readLocalWalletProfiles(envPath) {
-  if (!existsSync(envPath)) return { profiles: [], invalidLines: [] }
-  const parsed = parseLocalWalletProfiles(readFileSync(envPath, "utf8"))
-  if (parsed.invalidLines.length) {
-    throw new Error(`本地钱包配置行无效：${parsed.invalidLines.join(", ")}`)
-  }
-  return parsed
-}
-
-export function localWalletRegistry(envPath) {
-  return Object.fromEntries(readLocalWalletProfiles(envPath).profiles.map((profile) => [
-    profile.id,
-    walletProviderDescriptor({ address: profile.address, source: profile.source }, { provider: "local" }),
-  ]))
-}
-
-export function mergeWalletRegistries(externalRegistry = {}, localRegistry = {}) {
-  const normalize = (registry, provider) => Object.fromEntries(Object.entries(registry).map(([id, info]) => [
-    id,
-    walletProviderDescriptor(info, { provider }),
-  ]))
-  return {
-    ...normalize(externalRegistry, "awp"),
-    ...normalize(localRegistry, "local"),
+function parseCommandOutput(text) {
+  const trimmed = String(text || "").trim()
+  if (!trimmed) return {}
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return { stdout: trimmed }
   }
 }
 
-export function localWalletAccount(envPath, profileId) {
-  return readLocalWalletProfiles(envPath).profiles.find((profile) => profile.id === profileId)?.account || null
+function safeCommandError(value) {
+  return String(value || "").replace(/https?:\/\/[^\s)]+/gi, "<rpc>")
 }
 
-export function createLocalWalletProfiles({ envPath, prefix = "wallet", start = 1, count = 1, reservedIds = [] }) {
-  const existing = readLocalWalletProfiles(envPath).profiles
-  const ids = new Set([...existing.map((profile) => profile.id), ...reservedIds.map(String)])
-  const created = []
-  const skipped = []
-  const lines = []
-  const safePrefix = sanitizeProfileId(prefix)
+export function createAwpWalletProvider({
+  root,
+  walletRoot,
+  walletsPath,
+  command = "awp-wallet",
+  spawnProcess = spawn,
+} = {}) {
+  if (!root || !walletRoot || !walletsPath) throw new TypeError("AWP provider requires root, walletRoot and walletsPath")
 
-  for (let index = 0; index < count; index += 1) {
-    const id = sanitizeProfileId(`${safePrefix}-${String(start + index).padStart(3, "0")}`)
-    if (ids.has(id)) {
-      skipped.push({ id, address: existing.find((profile) => profile.id === id)?.address || "" })
-      continue
-    }
-    const privateKey = generatePrivateKey()
-    const account = privateKeyToAccount(privateKey)
-    lines.push(`# nfttool-profile: ${id}`, privateKey.slice(2))
-    created.push({ id, address: account.address, source: "root-env" })
-    ids.add(id)
+  const registry = () => readAwpWalletRegistry(walletsPath)
+  const getWallet = (walletId) => registry()[String(walletId)] || null
+  const accountForWallet = (walletId) => {
+    const wallet = getWallet(walletId)
+    return wallet ? accountAdapter(wallet) : null
   }
 
-  if (lines.length) {
-    mkdirSync(dirname(envPath), { recursive: true, mode: 0o700 })
-    const needsLeadingNewline = existsSync(envPath) && readFileSync(envPath, "utf8").length > 0
-    appendFileSync(envPath, `${needsLeadingNewline ? "\n" : ""}${lines.join("\n")}\n`, { mode: 0o600 })
-    chmodSync(envPath, 0o600)
+  function commandEnv(walletId) {
+    const env = { ...process.env }
+    delete env.AWP_SESSION_ID
+    delete env.AWP_AGENT_ID
+    if (walletId !== "default") env.AWP_AGENT_ID = walletId
+    return env
   }
 
-  return { created, skipped }
-}
-
-export function parseWalletImportText(text, { prefix = "imported" } = {}) {
-  const source = String(text || "")
-  const profileFormat = source.split(/\r?\n/).some((line) => PROFILE_MARKER_PATTERN.test(line.trim()))
-  if (profileFormat) {
-    const parsed = parseLocalWalletProfiles(source)
-    if (parsed.invalidLines.length) throw new Error(`导入配置行无效：${parsed.invalidLines.join(", ")}`)
-    if (!parsed.profiles.length) throw new Error("请至少粘贴一个私钥")
-    if (parsed.profiles.length > 500) throw new Error("每次最多导入 500 个钱包")
-    return parsed.profiles.map((profile) => ({
-      id: profile.id,
-      label: profile.id.slice(0, 80),
-      group: normalizeWalletGroup(profile.group),
-      privateKey: profile.privateKey,
-    }))
-  }
-
-  const rows = []
-  let index = 1
-  for (const [offset, sourceLine] of source.split(/\r?\n/).entries()) {
-    const line = sourceLine.trim()
-    if (!line || line.startsWith("#")) continue
-    const parts = line.split(",").map((value) => value.trim())
-    if (parts.length !== 2 && parts.length !== 3) {
-      throw new Error(`导入第 ${offset + 1} 行必须使用“名称,私钥”或“名称,分组,私钥”格式`)
-    }
-    const [label, group = "", key] = parts.length === 2
-      ? [parts[0], "", parts[1]]
-      : parts
-    if (!label) throw new Error(`导入第 ${offset + 1} 行缺少钱包名称`)
-    if (!BARE_PRIVATE_KEY_PATTERN.test(key || "")) throw new Error(`导入第 ${offset + 1} 行的私钥无效`)
-    const fallbackId = `${prefix}-${String(index).padStart(3, "0")}`
-    rows.push({
-      id: sanitizeProfileId(label, fallbackId),
-      label: label.slice(0, 80),
-      group: normalizeWalletGroup(group),
-      privateKey: normalizePrivateKey(key),
-    })
-    index += 1
-  }
-  if (!rows.length) throw new Error("请至少粘贴一个私钥")
-  if (rows.length > 500) throw new Error("每次最多导入 500 个钱包")
-  return rows
-}
-
-export function importLocalWalletProfiles({ envPath, text, prefix = "imported", reservedIds = [] }) {
-  const existing = readLocalWalletProfiles(envPath).profiles
-  const imported = parseWalletImportText(text, { prefix: sanitizeProfileId(prefix, "imported") })
-  const ids = new Set([...existing.map((profile) => profile.id), ...reservedIds.map(String)])
-  const addresses = new Set(existing.map((profile) => profile.address.toLowerCase()))
-  const created = []
-
-  for (const row of imported) {
-    if (ids.has(row.id)) throw new Error(`本地钱包编号重复：${row.id}`)
-    const account = privateKeyToAccount(row.privateKey)
-    if (addresses.has(account.address.toLowerCase())) throw new Error(`本地钱包地址重复：${account.address}`)
-    ids.add(row.id)
-    addresses.add(account.address.toLowerCase())
-    created.push({
-      id: row.id,
-      address: account.address,
-      source: "root-env",
-      label: row.label,
-      group: row.group,
-      privateKey: row.privateKey,
+  function run(walletId, args, { timeoutMs = 120_000, uncertainOnTimeout = false } = {}) {
+    const id = profileId(walletId)
+    return new Promise((resolve, reject) => {
+      const child = spawnProcess(command, args, {
+        cwd: root,
+        env: commandEnv(id),
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+      let stdout = ""
+      let stderr = ""
+      let settled = false
+      let timer
+      const finish = (callback) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        callback()
+      }
+      timer = setTimeout(() => {
+        child.kill("SIGTERM")
+        const error = new Error(uncertainOnTimeout ? "awp-wallet 广播超时，结果待确认" : "awp-wallet 执行超时")
+        if (uncertainOnTimeout) {
+          error.code = "BROADCAST_UNCERTAIN"
+          error.broadcastUncertain = true
+        }
+        finish(() => reject(error))
+      }, timeoutMs)
+      child.stdout.on("data", (data) => { stdout += data.toString() })
+      child.stderr.on("data", (data) => { stderr += data.toString() })
+      child.on("error", (error) => finish(() => reject(error)))
+      child.on("close", (code) => finish(() => {
+        if (code !== 0) {
+          reject(new Error(safeCommandError(stderr.trim() || stdout.trim() || `awp-wallet 退出码 ${code}`)))
+          return
+        }
+        resolve(parseCommandOutput(stdout))
+      }))
     })
   }
 
-  const currentText = existsSync(envPath) ? readFileSync(envPath, "utf8") : ""
-  const lines = profileBlock(created)
-  const needsLeadingNewline = currentText.length > 0 && !currentText.endsWith("\n\n")
-  appendFileSync(envPath, `${needsLeadingNewline ? "\n" : ""}${lines.join("\n")}\n`, { mode: 0o600 })
-  chmodSync(envPath, 0o600)
-  return created.map(({ privateKey, ...profile }) => profile)
-}
-
-export function exportLocalWalletProfiles({ envPath, profileIds, groupsById = {} }) {
-  const selected = new Set((profileIds || []).map(String))
-  const profiles = readLocalWalletProfiles(envPath).profiles
-    .filter((profile) => selected.has(profile.id))
-    .map((profile) => ({
-      ...profile,
-      group: Object.prototype.hasOwnProperty.call(groupsById, profile.id)
-        ? normalizeWalletGroup(groupsById[profile.id])
-        : profile.group,
-    }))
-  if (!profiles.length) throw new Error("请至少选择一个本地钱包")
-  if (profiles.length !== selected.size) throw new Error("一个或多个所选钱包不属于本地钱包")
-  return `${profileBlock(profiles).join("\n")}\n`
-}
-
-export function removeLocalWalletProfiles({ envPath, profileIds }) {
-  const selected = new Set((profileIds || []).map(String))
-  if (!selected.size) throw new Error("请至少选择一个本地钱包")
-  const source = existsSync(envPath) ? readFileSync(envPath, "utf8") : ""
-  const parsed = readLocalWalletProfiles(envPath)
-  const existingIds = new Set(parsed.profiles.map((profile) => profile.id))
-  for (const id of selected) {
-    if (!existingIds.has(id)) throw new Error(`未找到本地钱包：${id}`)
+  async function createWallets({ count, prefix, start }) {
+    mkdirSync(walletRoot, { recursive: true, mode: 0o700 })
+    const created = []
+    const skipped = []
+    const known = registry()
+    for (let index = 0; index < count; index += 1) {
+      const id = profileId(`${prefix}-${String(start + index).padStart(3, "0")}`)
+      if (known[id]) {
+        skipped.push({ id, address: known[id].address })
+        continue
+      }
+      const result = await run(id, ["init"])
+      const refreshed = registry()
+      const address = result?.address || refreshed[id]?.address
+      walletAddress(address, id)
+      const descriptor = walletProviderDescriptor({ address, source: "awp" }, id)
+      known[id] = descriptor
+      created.push({ id, address: descriptor.address, source: "awp" })
+    }
+    return { created, skipped }
   }
-  const kept = parsed.profiles.filter((profile) => !selected.has(profile.id))
-  const config = nonWalletLines(source)
-  const output = [...profileBlock(kept), ...(kept.length && config.length ? [""] : []), ...config].join("\n")
-  writeWalletFile(envPath, output)
-  return { removed: [...selected], remaining: kept.map(({ privateKey, account, ...profile }) => profile) }
+
+  async function sendTransaction(walletId, args, options) {
+    const wallet = getWallet(walletId)
+    if (!wallet) {
+      const error = new Error(`未找到钱包：${walletId}`)
+      error.status = 404
+      throw error
+    }
+    requireWalletCapability(wallet, "sendTransaction")
+    return run(String(walletId), args, { ...options, uncertainOnTimeout: true })
+  }
+
+  return Object.freeze({
+    kind: "awp",
+    management: AWP_MANAGEMENT_CAPABILITIES,
+    registry,
+    getWallet,
+    accountForWallet,
+    createWallets,
+    sendTransaction,
+    summary: walletProviderSummary,
+  })
 }

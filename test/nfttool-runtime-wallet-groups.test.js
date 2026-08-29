@@ -198,3 +198,27 @@ test('wallet manager exposes ungrouped filtering and a bulk clear action', () =>
   assert.doesNotMatch(ungrouped, /data-wallet-row="a"/);
   assert.match(String(renderWalletManager), /walletIds: ids, group: ''/);
 });
+
+test('wallet manager hides private-key actions for an AWP-only provider', () => {
+  const state = makeState();
+  state.walletProvider = {
+    kind: 'awp',
+    management: {
+      createWallets: true,
+      importPrivateKeys: false,
+      exportPrivateKeys: false,
+      removeWallets: false,
+    },
+  };
+  state.wallets = state.wallets.map((wallet) => ({
+    ...wallet,
+    provider: 'awp',
+    capabilities: { exportPrivateKey: false, removeWallet: false },
+  }));
+
+  const html = renderWalletManager({ state, openDialog() {}, render() {}, toast() {} }).html;
+  assert.match(html, /id="create-wallets"/);
+  assert.doesNotMatch(html, /id="import-wallets"/);
+  assert.doesNotMatch(html, /id="delete-wallets"/);
+  assert.doesNotMatch(html, /id="export-wallets"/);
+});
