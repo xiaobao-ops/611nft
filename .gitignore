@@ -16,7 +16,10 @@ wallets.txt
 .DS_Store
 **/.DS_Store
 .playwright-mcp/
+.playwright-cli/
+test-results/
 outputs/
+output/
 artifacts/
 reverse-evidence/
 verification/
@@ -32,3 +35,6 @@ apps/web/.next/
 *.key
 *.keystore
 *.wallet
+
+# 源码快照压缩包，不入库
+archives/
