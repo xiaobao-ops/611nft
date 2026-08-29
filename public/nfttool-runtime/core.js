@@ -27,22 +27,6 @@ const PROFILE_LABELS = [
   ['custom', '自定义'],
 ];
 
-const routeMeta = {
-  walletManager: { title: '钱包管理', section: '钱包模块' },
-  ethDisperse: { title: '分发代币', section: '钱包模块' },
-  ethCollection: { title: '归集代币', section: '钱包模块' },
-  moreToMore: { title: '多对多转账', section: '钱包模块' },
-  despositToExchange: { title: '交易所充值', section: '钱包模块' },
-  mint: { title: 'NFT 盯盘', section: '数据流' },
-  documentaryList: { title: '跟单 / 自动铸造', section: '跟单模块' },
-  signTask: { title: '项目破签', section: 'Mint 高级版' },
-  highHexMint: { title: '高级铸造', section: 'Mint 高级版' },
-  opensea: { title: 'OpenSea', section: 'Mint 高级版' },
-  batchSell: { title: '批量挂单', section: 'NFT 管理' },
-  collectionNFT: { title: 'NFT 归集', section: 'NFT 管理' },
-  batchApprove: { title: '批量授权', section: 'NFT 管理' },
-};
-
 function storedSelection() {
   return new Set(readStoredWalletIds());
 }
@@ -682,7 +666,6 @@ export function renderRuntime() {
   }
   const focused = focusedControlSnapshot(app);
   const scrollPosition = scrollPositionSnapshot(app);
-  const meta = routeMeta[runtimeState.routeName] || { title: '未知模块', section: 'NFT TOOL' };
   const context = {
     state: runtimeState,
     api,
@@ -694,10 +677,7 @@ export function renderRuntime() {
   const view = activeRenderer(context) || { html: '' };
   app.innerHTML = `
     <div class="runtime-shell" data-route="${escapeHtml(runtimeState.routeName)}">
-      <header class="runtime-header">
-        <div><span>${escapeHtml(meta.section)}</span><h1>${escapeHtml(meta.title)}</h1></div>
-        <div class="runtime-metrics"><span>钱包 <strong>${runtimeState.wallets.length}</strong></span><span>已选 <strong>${selectedIds().length}</strong></span></div>
-      </header>
+      <div class="runtime-statusbar" aria-label="钱包选择状态"><span>钱包 <strong>${runtimeState.wallets.length}</strong></span><span>已选 <strong>${selectedIds().length}</strong></span></div>
       <div class="runtime-content">${view.html}</div>
     </div>
   `;

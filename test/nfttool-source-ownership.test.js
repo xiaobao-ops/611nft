@@ -51,6 +51,19 @@ test("runtime features are loaded from static Vite assets by module", () => {
   assert.doesNotMatch(runtime, /\|\|\s*renderWalletManager|WorkspaceModule|611nft-logo-ui/)
 })
 
+test("the outer shell is the only owner of runtime page titles", () => {
+  const shell = source("src/Shell.jsx")
+  const core = source("public/nfttool-runtime/core.js")
+  const styles = source("public/nfttool-runtime/styles.css")
+  assert.match(shell, /<h1>\{activeRoute\?\.label/)
+  assert.doesNotMatch(core, /routeMeta|<h1>|meta\.(?:title|section)/)
+  assert.match(core, /class="runtime-statusbar" aria-label="钱包选择状态"/)
+  assert.match(core, /runtimeState\.wallets\.length/)
+  assert.match(core, /selectedIds\(\)\.length/)
+  assert.doesNotMatch(styles, /\.runtime-header/)
+  assert.match(styles, /\.runtime-statusbar\s*\{[\s\S]*min-height:\s*34px/)
+})
+
 test("alarm and transaction routes are independent lazy chunks", () => {
   const shell = source("src/Shell.jsx")
   const alarm = source("src/AlarmRoute.jsx")
