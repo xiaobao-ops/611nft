@@ -2,12 +2,38 @@ import { defineConfig } from "vite"
 import react from "@vitejs/plugin-react"
 
 const clientPort = Number(process.env.WALLET_BOARD_CLIENT_PORT || 5173)
-const apiPort = Number(process.env.WALLET_BOARD_PORT || 8787)
+const apiPort = Number(process.env.WALLET_BOARD_PORT || 8791)
 const host = process.env.WALLET_BOARD_HOST || "127.0.0.1"
 const apiTargetHost = process.env.WALLET_BOARD_API_TARGET_HOST || process.env.WALLET_BOARD_API_HOST || "127.0.0.1"
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: "nfttool-runtime-history-fallback",
+      configureServer(server) {
+        server.middlewares.use((request, _response, next) => {
+          const pathname = String(request.url || "").split("?", 1)[0]
+          if (/^\/nfttool-runtime\/[^./]+\/?$/.test(pathname)) request.url = "/nfttool-runtime/index.html"
+          next()
+        })
+      },
+      configurePreviewServer(server) {
+        server.middlewares.use((request, _response, next) => {
+          const pathname = String(request.url || "").split("?", 1)[0]
+          if (/^\/nfttool-runtime\/[^./]+\/?$/.test(pathname)) request.url = "/nfttool-runtime/index.html"
+          next()
+        })
+      },
+    },
+  ],
+  base: "/",
+  resolve: {
+    dedupe: ["react", "react-dom"],
+  },
+  build: {
+    outDir: "dist",
+  },
   server: {
     host,
     port: clientPort,

@@ -7,7 +7,7 @@ if [[ ! -f .env ]]; then
   cp .env.example .env
   chmod 600 .env
   echo "已创建 $ROOT/.env。默认配置可直接启动只读监控。"
-  echo "执行 Mint 前请先安装 awp-wallet 并配置本地 AWP profiles。"
+  echo "执行 Mint 前，请在 .env 末尾每行填写一个 64 位十六进制私钥。"
 fi
 chmod 600 .env
 
@@ -16,7 +16,7 @@ if [[ ! -d node_modules ]] || ! node -e "Promise.all([import('viem'), import('re
 fi
 
 PORT_VALUE="$(awk -F= '/^WALLET_BOARD_PORT=/{print $2; exit}' .env | tr -d '[:space:]')"
-PORT_VALUE="${PORT_VALUE:-8787}"
+PORT_VALUE="${PORT_VALUE:-8791}"
 URL="http://127.0.0.1:${PORT_VALUE}"
 LOG_DIR="$ROOT/.runtime/logs"
 mkdir -p "$LOG_DIR"

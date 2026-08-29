@@ -42,8 +42,8 @@ if [[ ! -d node_modules/viem ]]; then
   echo
 fi
 
-if ! command -v awp-wallet >/dev/null 2>&1; then
-  echo "未找到 awp-wallet。请先安装并配置本地 AWP wallet profiles。"
+if [[ ! -f .env ]] || ! awk '/^[[:space:]]*(0x)?[0-9a-fA-F]{64}[[:space:]]*$/{found=1} END{exit !found}' .env; then
+  echo "根 .env 中没有本地钱包。请每行填写一个 64 位十六进制私钥后再运行。"
   exit 1
 fi
 
@@ -56,9 +56,9 @@ while true; do
   echo "CA 格式错误，请输入以 0x 开头的 40 位 EVM 合约地址。"
 done
 
-read -r "wallet_profiles?请输入 AWP wallet profile ID（多个用逗号分隔）: "
+read -r "wallet_profiles?请输入本地钱包 profile ID（多个用逗号分隔，首个钱包为 default）: "
 if [[ -z "${wallet_profiles//[[:space:]]/}" ]]; then
-  echo "至少需要一个 AWP wallet profile。"
+  echo "至少需要一个本地钱包 profile。"
   exit 1
 fi
 

@@ -1,0 +1,318 @@
+.utilityRoute {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  padding: 18px;
+  overflow: auto;
+  color: #20242a;
+  background: #f5f6f8;
+}
+
+.utilityRoute button,
+.utilityRoute input,
+.utilityRoute select { font: inherit; letter-spacing: 0; }
+.utilityRoute button:focus-visible,
+.utilityRoute input:focus-visible,
+.utilityRoute select:focus-visible { outline: 2px solid #3578f6; outline-offset: 2px; }
+
+.utilityToolbar {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #e1e5ea;
+  border-radius: 6px 6px 0 0;
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.utilityToolbarCopy { min-width: 0; }
+.utilityToolbarCopy strong,
+.utilityToolbarCopy span { display: block; }
+.utilityToolbarCopy strong { font-size: 14px; }
+.utilityToolbarCopy span { margin-top: 4px; color: #767e88; font-size: 11px; line-height: 1.4; }
+.utilityToolbarActions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+
+.utilitySelect { display: flex; align-items: center; gap: 7px; color: #6d7580; font-size: 11px; }
+.utilitySelect select,
+.alarmRuleForm select,
+.alarmRuleForm input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid #d9dee5;
+  border-radius: 4px;
+  background: #fff;
+  color: #252a31;
+  padding: 0 9px;
+  font-size: 12px;
+}
+.utilitySelect select { width: auto; min-width: 150px; }
+
+.utilityButton,
+.utilityPrimaryButton,
+.alarmRuleActions button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #d9dee5;
+  border-radius: 4px;
+  background: #fff;
+  color: #4d5662;
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.utilityButton:hover,
+.alarmRuleActions button:hover { border-color: #b7c0cc; color: #20242a; background: #f7f8fa; }
+.utilityButton:disabled,
+.utilityPrimaryButton:disabled,
+.alarmRuleActions button:disabled { cursor: not-allowed; opacity: .55; }
+.utilityPrimaryButton { border-color: #28754e; background: #28754e; color: #fff; }
+.utilityPrimaryButton:hover { background: #236a46; }
+.iconButton { width: 34px; padding: 0 !important; }
+.iconButton.danger { color: #b34444; }
+
+.streamBadge,
+.notifierBadge {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #d9dee5;
+  border-radius: 4px;
+  color: #737b85;
+  padding: 0 8px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.streamBadge.connected,
+.notifierBadge.active { border-color: #9bc8ad; background: #f1faf4; color: #28754e; }
+
+.utilityError {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #e5b7b3;
+  border-top: 0;
+  background: #fff4f2;
+  color: #9e3732;
+  padding: 8px 12px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.utilityToggle {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #dfe3e8;
+  border-radius: 4px;
+  background: #fff;
+  color: #59616b;
+  padding: 0 9px;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.utilityToggle input { width: 14px; height: 14px; margin: 0; accent-color: #28754e; }
+.utilityToggle span { display: inline-flex; align-items: center; gap: 5px; }
+
+.alarmPreferences {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e1e5ea;
+  border-top: 0;
+  background: #fafbfc;
+  padding: 9px 12px;
+}
+.alarmPreferenceTitle { min-width: 170px; display: flex; align-items: center; gap: 8px; }
+.alarmPreferenceTitle > span { min-width: 0; }
+.alarmPreferenceTitle strong,
+.alarmPreferenceTitle small { display: block; }
+.alarmPreferenceTitle strong { font-size: 11px; }
+.alarmPreferenceTitle small { margin-top: 2px; color: #858d97; font-size: 9px; }
+.alarmChainSummary { min-width: 0; margin-left: auto; color: #7a828d; font-size: 10px; text-align: right; }
+
+.alarmLayout {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, .72fr) minmax(420px, 1.28fr);
+  border: 1px solid #e1e5ea;
+  border-top: 0;
+  background: #fff;
+}
+.alarmRuleForm {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  border-right: 1px solid #e7eaee;
+  padding: 14px;
+}
+.alarmRuleForm > header,
+.alarmRuleList > header,
+.alarmHistory > header {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.alarmRuleForm > header strong,
+.alarmRuleList > header strong,
+.alarmHistory > header strong { font-size: 12px; }
+.alarmRuleForm > header button { border: 0; background: transparent; color: #65707c; padding: 4px; cursor: pointer; font-size: 10px; }
+.alarmRuleForm > label,
+.alarmFieldPair > label { min-width: 0; display: grid; gap: 5px; color: #68717c; font-size: 10px; }
+.alarmFieldPair { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 8px; }
+.alarmFieldPair .utilityToggle { height: 34px; }
+.alarmRuleForm .utilityPrimaryButton { width: 100%; }
+
+.alarmRuleList { min-width: 0; }
+.alarmRuleList > header,
+.alarmHistory > header { border-bottom: 1px solid #e7eaee; background: #fafbfc; padding: 0 12px; }
+.alarmRuleList > header span,
+.alarmHistory > header span { color: #7d858f; font-size: 10px; }
+.alarmRuleRows { min-width: 0; }
+.alarmRuleRow {
+  min-width: 0;
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: 10px minmax(160px, 1fr) 64px auto;
+  align-items: center;
+  gap: 9px;
+  border-bottom: 1px solid #edf0f3;
+  padding: 8px 12px;
+}
+.alarmRuleStatus { width: 8px; height: 8px; border-radius: 50%; background: #a6adb6; box-shadow: 0 0 0 4px #f0f2f4; }
+.alarmRuleStatus.active { background: #2f955f; box-shadow: 0 0 0 4px #eaf6ee; }
+.alarmRuleIdentity,
+.alarmCooldown { min-width: 0; display: grid; gap: 3px; }
+.alarmRuleIdentity strong,
+.alarmRuleIdentity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alarmRuleIdentity strong,
+.alarmCooldown strong { font-size: 11px; }
+.alarmRuleIdentity small,
+.alarmCooldown small { color: #7b838d; font-size: 9px; }
+.alarmRuleActions { display: flex; align-items: center; gap: 5px; }
+.alarmRuleActions button { min-height: 30px; }
+
+.alarmHistory {
+  min-width: 0;
+  border: 1px solid #e1e5ea;
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: #fff;
+}
+.alarmHistory article {
+  min-width: 0;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border-bottom: 1px solid #edf0f3;
+  padding: 8px 12px;
+}
+.alarmHistory article > span { min-width: 0; display: grid; gap: 3px; }
+.alarmHistory article strong,
+.alarmHistory article small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alarmHistory article strong { font-size: 11px; }
+.alarmHistory article small,
+.alarmHistory article time { color: #7b838d; font-size: 9px; }
+
+.transactionTable {
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid #e1e5ea;
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: #fff;
+}
+.transactionTable table { width: 100%; min-width: 820px; border-collapse: collapse; }
+.transactionTable th,
+.transactionTable td { min-width: 0; border-bottom: 1px solid #edf0f3; padding: 11px 12px; text-align: left; vertical-align: middle; font-size: 11px; }
+.transactionTable th { position: sticky; top: 0; z-index: 1; background: #fafbfc; color: #6e7782; font-size: 10px; font-weight: 600; }
+.transactionTable td { color: #454d57; }
+.transactionTable td:nth-child(5) { max-width: 360px; overflow-wrap: anywhere; }
+.transactionWallet { color: #292f36; }
+.transactionStatus { min-height: 24px; display: inline-flex; align-items: center; border: 1px solid #d9dee5; border-radius: 999px; background: #f7f8fa; color: #636c77; padding: 0 8px; font-size: 9px; white-space: nowrap; }
+.transactionStatus.success { border-color: #acd2bb; background: #eff9f2; color: #27734c; }
+.transactionStatus.pending { border-color: #ddc799; background: #fff8e8; color: #8a641d; }
+.transactionStatus.danger { border-color: #e3b3af; background: #fff2f0; color: #9d3934; }
+.transactionLink { display: inline-flex; align-items: center; gap: 5px; color: #2765c5; text-decoration: none; }
+.transactionLink:hover { text-decoration: underline; }
+.transactionTable code { color: inherit; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; }
+.transactionError { color: #a13e38 !important; }
+.utilityMuted { color: #8b929b; }
+
+.utilityEmpty {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  color: #7d858f;
+  font-size: 11px;
+}
+.utilityEmpty.compact { min-height: 76px; }
+.utilityEmpty strong { color: #555e69; font-size: 12px; }
+.spin { animation: utility-spin 700ms linear infinite; }
+@keyframes utility-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 980px) {
+  .utilityRoute { padding: 12px; }
+  .alarmPreferences { flex-wrap: wrap; }
+  .alarmChainSummary { width: 100%; margin-left: 0; text-align: left; }
+  .alarmLayout { grid-template-columns: minmax(240px, .82fr) minmax(360px, 1.18fr); }
+  .alarmRuleRow { grid-template-columns: 10px minmax(140px, 1fr) auto; }
+  .alarmCooldown { display: none; }
+}
+
+@media (max-width: 760px) {
+  .utilityRoute { padding: 0; background: #fff; }
+  .utilityToolbar { min-height: auto; align-items: stretch; flex-direction: column; border-inline: 0; border-radius: 0; padding: 10px 12px; }
+  .utilityToolbarActions { justify-content: flex-start; flex-wrap: wrap; }
+  .utilitySelect { flex: 1 1 170px; }
+  .utilitySelect select { min-width: 0; flex: 1; }
+  .alarmPreferences { border-inline: 0; }
+  .alarmPreferenceTitle { width: 100%; }
+  .alarmLayout { display: block; border-inline: 0; }
+  .alarmRuleForm { border-right: 0; border-bottom: 1px solid #e1e5ea; }
+  .alarmHistory { border-inline: 0; border-radius: 0; }
+  .transactionTable { overflow: visible; border-inline: 0; border-radius: 0; }
+  .transactionTable table,
+  .transactionTable tbody,
+  .transactionTable tr,
+  .transactionTable td { width: 100%; min-width: 0; display: block; }
+  .transactionTable thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .transactionTable tr { border-bottom: 6px solid #f5f6f8; padding: 8px 12px; }
+  .transactionTable td { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 9px; border-bottom: 1px solid #f0f2f4; padding: 8px 0; overflow-wrap: anywhere; }
+  .transactionTable td:last-child { border-bottom: 0; }
+  .transactionTable td::before { content: attr(data-label); color: #7b838d; font-size: 10px; }
+  .transactionTable td:nth-child(5) { max-width: none; }
+}
+
+@media (max-width: 520px) {
+  .alarmRuleRow { grid-template-columns: 10px minmax(0, 1fr); align-items: start; }
+  .alarmCooldown { display: grid; grid-column: 2; }
+  .alarmRuleActions { grid-column: 2; flex-wrap: wrap; }
+  .alarmRuleActions > button:first-child { min-width: 62px; }
+  .alarmHistory article { grid-template-columns: auto minmax(0, 1fr); }
+  .alarmHistory article time { grid-column: 2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .utilityRoute *,
+  .utilityRoute *::before,
+  .utilityRoute *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
